@@ -77,19 +77,17 @@ describe('自定义背景字段（自定义背景 v1）：customBackgrounds + cu
 })
 
 describe('背景 v2 契约（视频背景 spec §四）', () => {
-  it('新四字段默认值：bgOpacity 0.8 / bgSaturation 1 / bgBreathe true / bgShowBodies false', () => {
+  it('新三字段默认值：bgOpacity 0.8 / bgSaturation 1 / bgBreathe true', () => {
     const d = DEFAULT_BACKGROUND_SETTINGS
     expect(d.bgOpacity).toBe(0.8)
     expect(d.bgSaturation).toBe(1)
     expect(d.bgBreathe).toBe(true)
-    expect(d.bgShowBodies).toBe(false)
   })
   it('sanitize 钳幅回默认：出界钳限、坏类型回默认', () => {
-    const s = sanitizeBackgroundSettings({ bgOpacity: 9, bgSaturation: -1, bgBreathe: 'x', bgShowBodies: 1 })
+    const s = sanitizeBackgroundSettings({ bgOpacity: 9, bgSaturation: -1, bgBreathe: 'x' })
     expect(s.bgOpacity).toBe(1)
     expect(s.bgSaturation).toBe(0)
     expect(s.bgBreathe).toBe(true)
-    expect(s.bgShowBodies).toBe(false)
   })
   it('收藏元数据 kind：缺失/坏值补 image（v1 存量迁移），video 保留', () => {
     const id1 = '11111111-2222-3333-4444-555555555555'

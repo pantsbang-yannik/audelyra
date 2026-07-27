@@ -49,6 +49,9 @@ export interface SceneContext {
   quality: QualityTier
   /** 手动档位（设置面板指定，M4 设计第 5 节）：给出则场景放弃 backend 自动选档，直接采用 */
   forcedTier?: QualityTier
+  /** GPU 计时（性能基线）：仅 perf 入口传 true。必须在 renderer 构造期传入——
+   * three 的 trackTimestamp 是 Backend 构造参数，构造后再赋值无效 */
+  trackTimestamp?: boolean
 }
 
 export interface Scene {
@@ -71,6 +74,8 @@ export interface Scene {
   applyMotion?(m: MotionSettings): void
   /** 实时注入镜头运镜设置（可选）：运行中场景热更活跃度旋钮，无需重建（Phase D） */
   applyCamera?(c: CameraSettings): void
+  /** 注入「镜头设置提交」回调（可选）：场景内滚轮改默认距离时，冒泡出去落盘 + 广播（#镜头精修 ①） */
+  setCameraCommit?(cb: (c: CameraSettings) => void): void
   /** 手动交互开关（可选）：小窗态禁运镜，拖拽让位给移窗（M4 设计第 4 节） */
   setInteractive?(on: boolean): void
   /** 切歌拼字设置（模式 off/timed/always + 大小，设置面板两行）；未实现的场景忽略 */

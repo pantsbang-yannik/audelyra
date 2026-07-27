@@ -13,6 +13,7 @@ import type { NarrativeState } from '../../engine/narrative'
 import { ArPulse, Spring, quantizeToBeatGrid, easeDrift } from '../shared/motion'
 import { SectionTracker } from './section-tracker'
 import { MIRROR_Y } from './background-types'
+import { CAMERA_LIMITS } from './camera-types'
 
 interface Preset {
   x: number
@@ -46,14 +47,12 @@ const BREATH_RATIO = 0.03 // 节拍呼吸 ±3% 距离
 const DROP_DOLLY = -0.3 // 负值=向外拉远（Phase D 反转：炸开瞬间看全貌，原 +0.12 推近加剧「看不全」）
 const ORBIT_SPEED_MAX = 0.06 // rad/s，burst 峰值公转速——一圈约 100s，是氛围不是转椅（spec §5.1）
 const DRAG_SENS = 0.005 // rad/px，拖拽灵敏度
-const WHEEL_SENS = 0.002 // 距离/deltaY，滚轮灵敏度
-// 距离安全钳基准值（distScale=1 时的窗口）。distScale 范围放宽到 [0.5, 3] 后，钳位与滚轮窗口
-// 都乘 distScale 等比缩放——否则 0.5×HOME=1.5 会被 1.6 下限压平、3×HOME=9.0 被上限压平，滑块两端失效
+// 滚轮灵敏度：deltaY → distScale 增量。滚轮直接改「默认距离倍率」而非临时偏移——
+// 滚轮=调默认距离（与调音台距离滑块同一个源），调到哪粘到哪，不再几秒后自动飘回（用户拍板 #镜头精修）
+const WHEEL_SENS_SCALE = 0.0016 // 一格滚轮 deltaY≈100 → distScale ±0.16，全程 [0.5,3] 约 15 格走完
+// 距离安全钳基准值（distScale=1 时的窗口），仍用于最终 dist 的等比钳位（× distScale）
 const DIST_MIN = 1.6
 const DIST_MAX = 4.6 // ×1 档下 OVERLOOK 3.48 + drop 拉远 0.3×2（活跃度顶格）≈ 4.08 仍可表达
-// 默认机位（HOME）距离原点的半径——滚轮偏移量的 clamp 以此为锚，
-// 使 baseDist + manualProxy.dist 恰好落在 [DIST_MIN, DIST_MAX]，反向回滚立即响应（不再消耗无界累积）
-const BASE_DIST = Math.hypot(PRESETS[0].x, PRESETS[0].y, PRESETS[0].z)
 const MANUAL_IDLE_SEC = 4 // 手动静止多久后自动归位
 const MANUAL_RETURN_SEC = 3 // 归位 tween 时长
 const PITCH_LIMIT = 0.8 // rad，手动 pitch 上下限（防翻转）
@@ -73,7 +72,7 @@ export class CameraDirector {
 
   // GSAP 只写这两个 proxy，update 每帧读进 camera
   private readonly sectionProxy: Preset = { ...PRESETS[0] }
-  private readonly manualProxy = { yaw: 0, pitch: 0, dist: 0 } // dist = 相对预设距离的增量
+  private readonly manualProxy = { yaw: 0, pitch: 0 } // 拖拽方位偏移（静止后自动归位）；距离已交给 distScale 永久旋钮
 
   // 呼吸/漂移的重阻尼 Spring（保留 M2 的 Spring(0.15,1.0) 手持质感）
   private readonly breathSpring = new Spring(0.2, 1.0)
@@ -92,6 +91,7 @@ export class CameraDirector {
   private narrative: NarrativeState = { phase: 'steady', progress: 0 }
   private liveliness = 1 // 运镜活跃度旋钮：只乘新手法（环绕/FOV 冲击/drop 拉远），spec §6
   private distScale = 1 // 默认距离倍率旋钮：等比缩放所有机位距离（0.7 贴近派 ↔ 1.3 远观派）
+  private onDistScaleChange: ((v: number) => void) | null = null // 滚轮改默认距离 → 冒泡给场景持久化（与滑块同源）
 
   // FOV 冲击（Phase D）：重拍瞬间焦段猛缩弹回，安全上限/限频写死在 FovPunch 内
   private readonly fovPunch = new FovPunch()
@@ -136,14 +136,14 @@ export class CameraDirector {
   private readonly onWheel = (e: WheelEvent): void => {
     if (!this.manualEnabled) return
     e.preventDefault()
-    // 累加后立即 clamp 到偏移边界——无界累积会让反向回滚先消耗历史累积量（滚轮死区）。
-    // 窗口乘 distScale：偏移相对「缩放后的基准」等比可达 [DIST_MIN, DIST_MAX]×distScale，任何偏好档都无死区
-    this.manualProxy.dist = clamp(
-      this.manualProxy.dist + e.deltaY * WHEEL_SENS,
-      (DIST_MIN - BASE_DIST) * this.distScale,
-      (DIST_MAX - BASE_DIST) * this.distScale
-    )
-    this.beginManual()
+    // 滚轮直接改「默认距离倍率」distScale——调到哪粘到哪，不再是几秒后飘回的临时偏移。
+    // 本帧立即写进 this.distScale（无跳变：下一帧 setDistScale 用同值覆盖），并冒泡给场景持久化，
+    // 使调音台距离滑块与之联动、重启后保留（用户拍板 #镜头精修 ①）。
+    const L = CAMERA_LIMITS.distScale
+    const next = clamp(this.distScale + e.deltaY * WHEEL_SENS_SCALE, L.min, L.max)
+    if (next === this.distScale) return
+    this.distScale = next
+    this.onDistScaleChange?.(next)
   }
   private readonly onDblClick = (): void => {
     if (!this.manualEnabled) return
@@ -165,7 +165,6 @@ export class CameraDirector {
     gsap.to(this.manualProxy, {
       yaw: 0,
       pitch: 0,
-      dist: 0,
       duration: MANUAL_RETURN_SEC,
       ease: (t: number) => easeDrift(t)
     })
@@ -228,6 +227,11 @@ export class CameraDirector {
     this.distScale = v
   }
 
+  /** 滚轮改默认距离时回调（新值已 clamp 到 CAMERA_LIMITS）：场景侧接住 → 更新 cameraSettings + 持久化 */
+  setOnDistScaleChange(cb: (v: number) => void): void {
+    this.onDistScaleChange = cb
+  }
+
   /** 任何手动输入：暂停自动运镜、复位静止计时、打断归位 tween（含 returnHome 的 orbitYaw 归位） */
   private beginManual(): void {
     this.manualHold = true
@@ -261,7 +265,6 @@ export class CameraDirector {
         gsap.to(this.manualProxy, {
           yaw: 0,
           pitch: 0,
-          dist: 0,
           duration: MANUAL_RETURN_SEC,
           ease: (t: number) => easeDrift(t),
           onComplete: () => {
@@ -346,7 +349,7 @@ export class CameraDirector {
     // ── 组装：距离（呼吸/drop 向内推）→ clamp → 手动距离偏移 + uiFocus 后拉偏移 → 旋转 → lookAt ──
     // uiFocus 后拉也乘 distScale：面板退台的「让位感」是屏幕占比语义（∝ 相对距离变化），
     // 绝对偏移在贴近档会猛拽（1.5→2.3 缩 35%）、远眺档几乎无感（9→9.8 缩 8%），等比后各档一致
-    let dist = baseDist - breath - dropDolly + this.manualProxy.dist + this.uiDist * this.distScale
+    let dist = baseDist - breath - dropDolly + this.uiDist * this.distScale
     dist = clamp(dist, DIST_MIN * this.distScale, DIST_MAX * this.distScale)
 
     const yaw = driftYaw + shakeYaw + this.orbitProxy.yaw + this.manualProxy.yaw

@@ -37,7 +37,9 @@ export interface MappingValues {
   targets: Record<VisualTarget, TargetMapping>
 }
 
-/** mapper 每帧输出的五类通用视觉控制量。对形状无知。 */
+/** mapper 每帧输出的五类通用视觉控制量。对形状无知。
+ * 值域：常规 0..1；gain/叠加超驱经软限幅渐近 1.25（curves.SOFT_LIMIT_CAP），
+ * space/brightness 的弹簧过冲可再略超——下游系数按此头部空间标定。 */
 export interface VisualControls {
   speed: number
   density: number

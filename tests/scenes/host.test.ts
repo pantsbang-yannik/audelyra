@@ -190,9 +190,9 @@ describe('UI 信号转发缓存（计划②T4）', () => {
     fake.scene.applyShape = (s) => applied.push(s)
     registerScene('ui-fake-5', () => fake.scene)
     const host = new SceneHost(canvas, bus, pump)
-    host.applyShape({ current: 'sphere', coverPriority: false, customCurrent: null, customShapes: [] })
+    host.applyShape({ current: 'heart', coverPriority: false, customCurrent: null, customShapes: [], showBody: true })
     await host.start('ui-fake-5', TIERS.high)
-    expect(applied).toContainEqual({ current: 'sphere', coverPriority: false, customCurrent: null, customShapes: [] })
+    expect(applied).toContainEqual({ current: 'heart', coverPriority: false, customCurrent: null, customShapes: [], showBody: true })
     host.stop()
   })
 

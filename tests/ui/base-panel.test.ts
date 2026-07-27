@@ -46,6 +46,9 @@ class TestPanel extends BasePanel {
   addTestRow(el: HTMLElement): void {
     this.appendRow(el)
   }
+  addFixed(el: HTMLElement): void {
+    this.appendFixed(el)
+  }
 }
 
 let created: FakeEl[]
@@ -72,9 +75,9 @@ describe('BasePanel（面板基座，Phase A2 T2）', () => {
     const panel = new TestPanel(fakeElement() as unknown as HTMLElement, {
       id: 'test-panel', title: '调音台', retreatProfile: 'camera'
     })
-    const container = created[0] // 根容器
+    const container = created[0] // 根容器：[标题栏, 固定区, 内容区]
     const header = container.children[0]
-    const content = container.children[1]
+    const content = container.children[2]
     expect(header.textContent).toBe('调音台')
     // 样式走 cssText 整块赋值（仓库惯例，见 settings-panel/tuning-panel）——断言关键片段而非单个属性
     expect(header.style.cssText).toContain('position: sticky')
@@ -88,10 +91,25 @@ describe('BasePanel（面板基座，Phase A2 T2）', () => {
       id: 'test-panel', title: '设置', retreatProfile: 'full'
     })
     const container = created[0]
-    const content = container.children[1]
+    const content = container.children[2]
     const row = fakeElement() as unknown as HTMLElement
     panel.addTestRow(row)
     expect(content.children).toContain(row)
+    panel.dispose()
+  })
+
+  it('固定区：appendFixed 的元素排在标题栏与内容区之间，不随内容滚动（不在 overflow 区内）', () => {
+    const panel = new TestPanel(fakeElement() as unknown as HTMLElement, {
+      id: 'test-panel', title: '调音台', retreatProfile: 'camera'
+    })
+    const container = created[0]
+    const fixed = container.children[1]
+    const content = container.children[2]
+    const tab = fakeElement() as unknown as HTMLElement
+    panel.addFixed(tab)
+    expect(fixed.children).toContain(tab)       // 固定区收下它
+    expect(content.children).not.toContain(tab) // 不在滚动内容区
+    expect(fixed.style.cssText).toContain('flex: none') // 与标题栏同为不滚动的固定段
     panel.dispose()
   })
 

@@ -49,15 +49,18 @@ import { aggregateStars, localDateOf } from './scenes/nebula/galaxy/aggregate'
 import { buildFilterView, anniversaryFor } from './scenes/nebula/galaxy/filter'
 import { dominantTint } from './scenes/nebula/galaxy/tint'
 import { setGalaxyArtworkFetcher } from './scenes/nebula/galaxy/covers'
+import type { StartupMarks, StartupResult } from './perf/report'
 import type { GalaxyPlayRecord, GalaxyStar, GalaxyFilter, GalaxyFilterView } from './scenes/nebula/galaxy/types'
 import type { SceneTrackEvent, QualityTier, ScenePlaybackProgress, SceneLyricsDoc } from './scenes/types'
 import type { MappingValues } from './scenes/nebula/mapping/types'
-import { CUSTOM_SHAPES_MAX, DEMO_SHAPE_IDS, type ShapeSettings, type ShapeId } from './scenes/nebula/shapes/types'
-import type { MotionSettings } from './scenes/nebula/motion/types'
-import type { CameraSettings } from './scenes/nebula/camera-types'
+import type { MacroKnobs } from './scenes/nebula/mapping/macro'
+import { CUSTOM_SHAPES_MAX, DEMO_SHAPE_IDS, SHAPE_IDS, DEFAULT_SHAPE_SETTINGS, type ShapeSettings, type ShapeId } from './scenes/nebula/shapes/types'
+import { DEFAULT_MOTION_SETTINGS, type MotionSettings } from './scenes/nebula/motion/types'
+import { DEFAULT_CAMERA_SETTINGS, type CameraSettings } from './scenes/nebula/camera-types'
 import type { TitleSettings } from './scenes/nebula/title-fx'
-import type { LyricsSettings } from './scenes/nebula/lyrics/lyrics-fx'
-import { CUSTOM_BACKGROUNDS_MAX, BACKGROUND_VIDEO_MAX_BYTES, type BackgroundSettings } from './scenes/nebula/background-types'
+import { DEFAULT_LYRICS_SETTINGS, type LyricsSettings } from './scenes/nebula/lyrics/lyrics-fx'
+import { CUSTOM_BACKGROUNDS_MAX, BACKGROUND_VIDEO_MAX_BYTES, DEFAULT_BACKGROUND_SETTINGS, type BackgroundSettings } from './scenes/nebula/background-types'
+import { REVISION as THREE_VERSION } from 'three'
 
 type TrackMsg = SceneTrackEvent
 
@@ -72,6 +75,8 @@ type RendererSettings = {
   preventSleep: boolean
   onboarded: boolean
   mapping: MappingValues
+  macroKnobs: MacroKnobs
+  tuningAdvancedExpanded: boolean
   shape: ShapeSettings
   motion: MotionSettings
   camera: CameraSettings
@@ -153,11 +158,27 @@ declare global {
       // 导出诊断（发布准备③）：报告生成在主进程；logDiag 上行渲染层错误进环形日志
       exportDiagnostics(): Promise<{ ok: boolean; path: string }>
       logDiag(source: string, message: string): void
+      // 性能基准（性能基线）：打包版主进程未注册对应 handler，调用会 reject
+      perfGetEnv(): Promise<import('./perf/report').PerfEnv | null>
+      perfStandardizeWindow(): Promise<{ w: number; h: number } | null>
+      perfRestoreWindow(size: { w: number; h: number }): Promise<void>
+      perfGetStartupMarks(): Promise<{
+        processStartMs: number; windowCreatedMs: number
+        mainNowMs: number; mainWallMs: number
+      }>
     }
+    // 启动里程碑（性能基线）：#perf 入口下三次累积对齐后写入，供 Task 14 归档读取；未采集完成前不存在
+    __audelyraStartup?: StartupResult
   }
 }
 
 async function boot(): Promise<void> {
+  // 启动里程碑（性能基线）：renderer 侧三个点，单位是渲染层 performance.now()，
+  // 换算到主进程坐标系在 #perf 装配处统一做
+  const markRendererLoaded = performance.now()
+  let markSceneInitDone = 0
+  let markFirstFrame = 0
+
   // 渲染层未捕获错误进主进程诊断日志（发布准备③）：纯内存环形缓冲，仅用户导出报告时落盘。
   // 挂在 boot 最前——后续任何装配步骤抛错都能被记到
   window.addEventListener('error', (e) => window.audelyra.logDiag('window', String(e.message).slice(0, 300)))
@@ -199,7 +220,9 @@ async function boot(): Promise<void> {
     })
   }
 
-  if (import.meta.env.DEV && location.hash.includes('debug')) {
+  // #perf 走正常场景装配路径（不是 #debug 的 2D 分支）——HUD 与基准必须能看到真正的 Nebula
+  const isPerf = import.meta.env.DEV && location.hash.includes('perf')
+  if (import.meta.env.DEV && location.hash.includes('debug') && !isPerf) {
     const { DebugView } = await import('./ui/debug/debug-view')
     const view = new DebugView(canvas)
     engine.bus.subscribe((s) => view.update(s))
@@ -212,9 +235,17 @@ async function boot(): Promise<void> {
     registerScene('nebula', createNebulaScene)
     let replayCapture: ((nowMs: number) => void) | null = null
     const host = new SceneHost(canvas, engine.bus, {
-      afterFrame: (now) => replayCapture?.(now),
+      afterFrame: (now) => {
+        // 首帧只记一次；用 performance.now() 而非 rAF 回调的 now 参数——
+        // 实测二者口径不一致，now 有时比同一时刻的 performance.now() 早几十毫秒，
+        // 会让 sceneInitDoneMs 反超 firstFrameSubmittedMs，破坏里程碑单调性
+        if (markFirstFrame === 0) markFirstFrame = performance.now()
+        replayCapture?.(now)
+      },
       // 场景 init 失败进诊断日志（发布准备③）：内部 catch 吞掉的 WebGPU 失败 window.onerror 看不见
-      onInitError: (sceneName, err) => window.audelyra.logDiag('scene-init', `${sceneName}: ${String(err).slice(0, 300)}`)
+      onInitError: (sceneName, err) => window.audelyra.logDiag('scene-init', `${sceneName}: ${String(err).slice(0, 300)}`),
+      // 滚轮改默认距离 → 落盘 + 广播（#镜头精修 ①）：与调音台距离滑块同一条 commit 路径，两边联动、重启保留
+      onCameraCommit: (c) => window.audelyra.commitCamera(c)
     })
 
     // 角标初始化
@@ -547,6 +578,10 @@ async function boot(): Promise<void> {
       getMapping: async () => (await window.audelyra.getSettings()).mapping,
       previewMapping: (m) => window.audelyra.previewMapping(m),
       commitMapping: (m) => window.audelyra.commitMapping(m),
+      getMacroKnobs: async () => (await window.audelyra.getSettings()).macroKnobs,
+      commitMacroKnobs: (k) => window.audelyra.setSettings({ macroKnobs: k }),
+      getAdvancedExpanded: async () => (await window.audelyra.getSettings()).tuningAdvancedExpanded,
+      commitAdvancedExpanded: (v) => window.audelyra.setSettings({ tuningAdvancedExpanded: v }),
       getShape: async () => (await window.audelyra.getSettings()).shape,
       setShape: (s) => window.audelyra.setSettings({ shape: s }),
       onShapeChanged: (cb) => window.audelyra.onSettingsChanged((s) => cb(s.shape)),
@@ -1041,6 +1076,209 @@ async function boot(): Promise<void> {
     const forced = (t: RendererSettings['tier']): QualityTier | undefined =>
       t === 'auto' ? undefined : TIERS[t]
     await host.start('nebula', TIERS.high, forced(appliedTier))
+    markSceneInitDone = performance.now() // 启动里程碑（性能基线）：场景初始化完成
+
+    // 性能基线：#perf 入口挂 HUD 与基准面板，1Hz 刷新（分位数排序绝不进渲染帧）
+    if (isPerf) {
+      const [{ perf }, { PerfHud }, { BenchPanel }, { BenchHost }, { SUITE }, { TracePlayer }, { formatSummary }, { nebulaGpuUnavailableReason }] =
+        await Promise.all([
+          import('./perf/collector'), import('./ui/debug/perf-hud'), import('./ui/debug/bench-panel'),
+          import('./perf/bench-host'), import('./perf/bench-runner'), import('./engine/trace'),
+          import('./perf/report'), import('./scenes/nebula'),
+        ])
+      const env = await window.audelyra.perfGetEnv()
+      const displayHz = env?.displayHz ?? 60
+      perf.setMode('hud', { displayHz })
+      const hud = new PerfHud(overlayDiv)
+      const benchQuality = TIERS.ultra // bench 锁 ultra：档位浮动会让样本混合两种配置
+      // HUD 档位读 perf.activeTier（场景 init 回填的实际生效档位真源）——hud 档下场景可能不是 ultra，
+      // 不能拿 benchQuality 硬顶；bench 跑起来后锁 ultra，activeTier 也会是 ultra，天然一致
+      const hudInterval = setInterval(() => {
+        const g = perf.gpu.summarize(perf.frameStats.count)
+        const t = perf.activeTier
+        hud.update(perf.frameStats.summarize(), {
+          targetIntervalMs: perf.targetIntervalMs,
+          tier: t?.name ?? '未知', particles: t?.particles ?? 0,
+          gpuAvgMs: g?.batchAvgMs.p50 ?? null,
+        })
+      }, 1000)
+      window.addEventListener('beforeunload', () => clearInterval(hudInterval))
+
+      // 输入源：trace 走 bus 直灌（视觉基准）；pcm 走 engine.ingest（引擎基准，唯一能测 engine 延迟的路径）
+      let tracePlayer: InstanceType<typeof TracePlayer> | null = null
+      let traceRaf = 0
+      let traceSha: string | null = null
+      let pcmTimer = 0
+
+      const startTrace = (): void => {
+        void (async () => {
+          const text = await (await fetch(new URL('./assets/traces/onboarding-demo.jsonl', import.meta.url))).text()
+          traceSha = await sha256Hex(text)
+          tracePlayer = new TracePlayer(text)
+          replayActive = true; updateLiveMute()
+          let last = performance.now()
+          const step = (now: number): void => {
+            tracePlayer?.step(Math.min((now - last) / 1000, 0.1), (s) => engine.bus.publish(s))
+            last = now
+            traceRaf = requestAnimationFrame(step)
+          }
+          traceRaf = requestAnimationFrame(step)
+        })()
+      }
+      const stopTrace = (): void => {
+        cancelAnimationFrame(traceRaf); tracePlayer = null
+        replayActive = false; updateLiveMute()
+      }
+      const startPcm = async (): Promise<void> => {
+        // 预解码不计入测量：解码在 warmup 之前完成
+        const buf = await (await fetch(new URL('./assets/audio/onboarding-demo.mp3', import.meta.url))).arrayBuffer()
+        const ctx = new AudioContext()
+        const decoded = await ctx.decodeAudioData(buf)
+        const ch = decoded.getChannelData(0)
+        const sr = decoded.sampleRate
+        const BATCH = 1024 // 与 PcmBatcher.BATCH_SAMPLES 一致
+        let cursor = 0
+        replayActive = true; updateLiveMute() // 旁路系统捕获，防双信号灌引擎
+        // 按挂钟节奏补送，与真实链路的突发特性接近
+        const blockMs = (BATCH / sr) * 1000
+        pcmTimer = window.setInterval(() => {
+          const due = Math.max(1, Math.round(20 / blockMs))
+          for (let i = 0; i < due; i++) {
+            if (cursor + BATCH > ch.length) cursor = 0 // 循环
+            engine.ingest({ sampleRate: sr, channels: 1, samples: ch.slice(cursor, cursor + BATCH) })
+            cursor += BATCH
+          }
+        }, 20)
+        void ctx.close()
+      }
+      const stopPcm = (): void => {
+        window.clearInterval(pcmTimer)
+        replayActive = false; updateLiveMute()
+      }
+
+      // 声明顺序：panel 的按钮回调要引用 runBench，runBench 又要报进度给 panel——
+      // 用 let 前置声明打破循环，panel 在最后构造
+      let panel: InstanceType<typeof BenchPanel> | null = null
+
+      const benchHost = new BenchHost({
+        startTrace, stopTrace, startPcm, stopPcm,
+        setShape: (id) => host.applyShape({ ...DEFAULT_SHAPE_SETTINGS, current: SHAPE_IDS.includes(id as ShapeId) ? (id as ShapeId) : DEFAULT_SHAPE_SETTINGS.current }),
+        setLyricsEnabled: (on) => host.applyLyrics({ ...DEFAULT_LYRICS_SETTINGS, enabled: on }),
+        enterGalaxy: () => host.applyGalaxy({ active: true, stars: [], filterView: null, selectedKey: null }),
+        exitGalaxy: () => host.applyGalaxy({ active: false, stars: [], filterView: null, selectedKey: null }),
+        gpuUnavailableReason: nebulaGpuUnavailableReason,
+        tierName: () => benchQuality.name,
+        particleCount: () => benchQuality.particles,
+        displayHz: () => displayHz,
+        onProgress: (t) => panel?.setStatus(t),
+        meta: async () => ({
+          appVersion: await window.audelyra.getAppVersion(),
+          commitSha: env?.commitSha ?? null, buildType: env?.buildType ?? 'dev',
+          osVersion: env?.osVersion ?? '未知', electronVersion: env?.electronVersion ?? '未知',
+          threeVersion: THREE_VERSION,
+          hw: { chip: env?.chip ?? '未知', memoryGB: env?.memoryGB ?? 0 },
+          backend: 'webgpu',
+          windowSize: { w: window.innerWidth, h: window.innerHeight },
+          drawingBufferSize: { w: Math.round(window.innerWidth * devicePixelRatio), h: Math.round(window.innerHeight * devicePixelRatio) },
+          devicePixelRatio,
+          displayHz, rafMedianMs: perf.frameStats.summarize().intervalMs.p50,
+          powerSource: env?.powerSource ?? 'ac', batteryPercent: env?.batteryPercent ?? null,
+          lowPowerMode: env?.lowPowerMode ?? null,
+          settingsProfile: 'default', trackTimestamp: true, traceSha256: traceSha,
+          generatedAt: new Date().toISOString(),
+        }),
+      })
+
+      const runBench = async (names: Parameters<typeof benchHost.run>[0]): Promise<void> => {
+        // prevSize 声明在 try 外：现场改动（窗口尺寸/用户设置/perf.mode）与 benchHost.run
+        // 全部纳入同一个 try——任何一步抛错都必须走到 finally，否则窗口/设置/模式会永久卡死
+        let prevSize: { w: number; h: number } | null = null
+        try {
+          prevSize = await window.audelyra.perfStandardizeWindow()
+          // 强制标准环境：默认设置消除变量（记录现状只能解释差异，消除不了）
+          host.applyShape(DEFAULT_SHAPE_SETTINGS)
+          host.applyMotion(DEFAULT_MOTION_SETTINGS)
+          host.applyCamera(DEFAULT_CAMERA_SETTINGS)
+          host.applyBackground(DEFAULT_BACKGROUND_SETTINGS)
+          // 锁 ultra 并禁用降级器（bench 纪律）：档位中途变会让样本混合两种配置
+          await host.start('nebula', TIERS.high, benchQuality, true)
+          perf.setMode('bench', { displayHz })
+          const report = await benchHost.run(names)
+          console.log(formatSummary(report))
+          downloadJson(report, `audelyra-perf-${report.meta.generatedAt.replace(/[:.]/g, '-')}.json`)
+          panel?.setStatus('完成，报告已下载')
+        } catch (err) {
+          console.error('[bench] 基准执行中断', err)
+          panel?.setStatus(`基准中断：${err instanceof Error ? err.message : String(err)}`)
+        } finally {
+          // 每步独立兜底：任一步失败不能连累后续恢复步骤
+          // 恢复失败要汇总进面板状态——用户是非技术用户，不看 console，
+          // 若只 console.error 而报告显示"完成"，用户会误以为窗口/设置已复原
+          const restoreFails: string[] = []
+          try {
+            perf.setMode('hud', { displayHz })
+          } catch (err) {
+            console.error('[bench] 恢复 perf 模式失败', err)
+          }
+          try {
+            if (prevSize) await window.audelyra.perfRestoreWindow(prevSize)
+          } catch (err) {
+            console.error('[bench] 恢复窗口尺寸失败', err)
+            restoreFails.push('窗口')
+          }
+          try {
+            const s = await window.audelyra.getSettings()
+            host.applyShape(s.shape); host.applyMotion(s.motion)
+            host.applyCamera(s.camera); host.applyBackground(s.background)
+          } catch (err) {
+            console.error('[bench] 恢复用户设置失败', err)
+            restoreFails.push('设置')
+          }
+          if (restoreFails.length > 0) panel?.setStatus(`⚠️ ${restoreFails.join('、')}未能恢复，建议重启应用`)
+        }
+      }
+
+      // panel 最后构造：此时 runBench 已定义，回调可安全引用
+      panel = new BenchPanel(overlayDiv, {
+        onRunSuite: () => void runBench([...SUITE]),
+        onRunPower: () => void runBench(['power-playback']),
+        onRunSoak: () => void runBench(['soak']),
+      })
+
+      // 启动里程碑：跨进程时钟对齐后累积三次，取中位数作判据（单次噪声过大）
+      void (async () => {
+        // 等首帧真的渲染出来再采集——否则 markFirstFrame 还是 0，算出来的是垃圾数字
+        await new Promise<void>((r) => {
+          const wait = (): void => (markFirstFrame > 0 ? r() : void requestAnimationFrame(wait))
+          wait()
+        })
+        const raw = await window.audelyra.perfGetStartupMarks()
+        // 主进程 performance.now() 零点对应的墙钟时刻
+        const mainEpochWall = raw.mainWallMs - raw.mainNowMs
+        // 渲染层 performance.now() 值 → 主进程坐标系
+        const toMain = (rendererNow: number): number =>
+          performance.timeOrigin + rendererNow - mainEpochWall
+        // 全部里程碑归一到「进程启动 = 0」
+        const base = raw.processStartMs
+        const marks: StartupMarks = {
+          processStartMs: 0,
+          windowCreatedMs: raw.windowCreatedMs - base,
+          rendererLoadedMs: toMain(markRendererLoaded) - base,
+          sceneInitDoneMs: toMain(markSceneInitDone) - base,
+          firstFrameSubmittedMs: toMain(markFirstFrame) - base,
+        }
+        const KEY = 'audelyra.perf.startup'
+        const prev: StartupMarks[] = JSON.parse(localStorage.getItem(KEY) ?? '[]')
+        const runs = [...prev, marks].slice(-3) // 只留最近三次
+        localStorage.setItem(KEY, JSON.stringify(runs))
+        const sorted = runs.map((r) => r.firstFrameSubmittedMs).sort((a, b) => a - b)
+        const startup: StartupResult = { runs, medianToFirstFrameMs: sorted[Math.floor(sorted.length / 2)] }
+        window.__audelyraStartup = startup
+        console.log(`[perf] 冷启动第 ${runs.length}/3 次：首帧 ${marks.firstFrameSubmittedMs.toFixed(0)}ms` +
+          (runs.length < 3 ? '（再重启应用 ' + (3 - runs.length) + ' 次凑满）' : `，中位数 ${startup.medianToFirstFrameMs.toFixed(0)}ms`))
+      })()
+    }
+
     host.applyTitle(initial.title) // 切歌拼字设置播种（模式+大小，重放语义同 camera）
     host.applyLyrics(initial.lyrics) // 歌词设置播种（重放语义同 title）
     // 自定义背景 fetcher 接线（自定义背景 v1 Task 8）：必须在 host.applyBackground(initial.background) 之前——
@@ -1084,9 +1322,10 @@ async function boot(): Promise<void> {
       const demoScript = new OnboardingDemoScript()
       let demoPlayback: DemoPlayback | null = null
       let demoAudio: HTMLAudioElement | null = null
-      // 序幕形体瞬态 apply 不落盘：coverPriority 关死防封面点云抢站位，customCurrent 清空防自定义盖过站形体
+      // 序幕形体瞬态 apply 不落盘：coverPriority 关死防封面点云抢站位，customCurrent 清空防自定义盖过站形体，
+      // showBody 压真防旧存档关着主体导致序幕黑屏
       const applyStation = (id: ShapeId): void => {
-        host.applyShape({ ...initial.shape, current: id, customCurrent: null, coverPriority: false })
+        host.applyShape({ ...initial.shape, current: id, customCurrent: null, coverPriority: false, showBody: true })
       }
       const stopDemo = (): void => {
         if (demoPlayback) { demoPlayback.stop(); demoPlayback = null }
@@ -1232,3 +1471,19 @@ async function boot(): Promise<void> {
 }
 
 void boot()
+
+/** trace 内容 hash——保证两次基准跑的是同一份输入 */
+async function sha256Hex(text: string): Promise<string> {
+  const buf = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(text))
+  return Array.from(new Uint8Array(buf)).map((b) => b.toString(16).padStart(2, '0')).join('')
+}
+
+/** 报告下载——走浏览器下载而非 IPC 写盘：零主进程改动，开发期够用 */
+function downloadJson(data: unknown, filename: string): void {
+  const url = URL.createObjectURL(new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' }))
+  const a = document.createElement('a')
+  a.href = url
+  a.download = filename
+  a.click()
+  URL.revokeObjectURL(url)
+}

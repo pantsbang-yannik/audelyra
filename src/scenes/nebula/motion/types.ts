@@ -1,4 +1,4 @@
-// 运动方言设置（Phase C2）：调音台"形状专属"tab 的 5 个手感旋钮，electron settings.motion 字段持久化。
+// 运动方言设置（Phase C2）：调音台"主体"tab 的 5 个手感旋钮，electron settings.motion 字段持久化。
 // 精选旋钮铁律（用户拍板甲案）：只露最影响观感的少数旋钮，其余走代码强默认。
 export interface MotionSettings {
   bombIntensity: number // 轰炸强度：持续层总幅度（鼓包/波纹/波前）
@@ -15,6 +15,9 @@ export interface MotionSettings {
   ledDensity: number // 点阵格子密度：越大格子越小越密
   ledWaveSpeed: number // 点阵环波速度：鼓点环波扩散的快慢
   ledCross: number // 点阵十字亮度：中心十字光束强度（0=关闭十字）
+  ledWaveThick: number // 点阵环波粗细：鼓点扩散环波光带的厚度（高斯包络宽度乘子）
+  ledWaveBright: number // 点阵环波亮度：只调环波这一层的亮度（不影响其他方块，点阵整体亮度固定）
+  waveWidth: number // 波形线横向宽度：波形线左右铺展的幅度（半宽乘子，波形线专属）
   laserSpread: number // 激光扇面开角：激光扇张开的最大角度
   laserSpeed: number // 激光扫动速度：光束扫动的快慢
   laserChaos: number // 激光乱度：0=规律扫动，1=无序漂移与随机跳位
@@ -27,8 +30,9 @@ export const DEFAULT_MOTION_SETTINGS: MotionSettings = {
   bombIntensity: 1, detailDensity: 1, waveSpeed: 1, buildDepth: 0.6, strobeEnabled: true, climaxBrightness: 1,
   lineBrightness: 0.6, lineBarHeight: 1,
   eclipseWaveLen: 1, eclipseWaveGap: 0.3, eclipseCorona: 1,
-  ledDensity: 1, ledWaveSpeed: 1, ledCross: 1,
+  ledDensity: 1, ledWaveSpeed: 1, ledCross: 1, ledWaveThick: 1, ledWaveBright: 1,
   laserSpread: 1, laserSpeed: 1, laserChaos: 0.6, laserMaxCount: 8,
+  waveWidth: 1,
 }
 
 /** 滑块量程单一事实源：sanitize 与调音台共用，防两处数字漂移 */
@@ -46,10 +50,13 @@ export const MOTION_LIMITS = {
   ledDensity: { min: 0.6, max: 2, step: 0.05 },
   ledWaveSpeed: { min: 0.5, max: 2, step: 0.05 },
   ledCross: { min: 0, max: 1.5, step: 0.05 },
+  ledWaveThick: { min: 0.2, max: 2, step: 0.05 },
+  ledWaveBright: { min: 0, max: 2, step: 0.05 },
   laserSpread: { min: 0.5, max: 1.5, step: 0.05 },
   laserSpeed: { min: 0.5, max: 2, step: 0.05 },
   laserChaos: { min: 0, max: 1, step: 0.05 },
   laserMaxCount: { min: 4, max: 14, step: 1 },
+  waveWidth: { min: 0.5, max: 3, step: 0.05 },
 } as const
 
 const num = (v: unknown, d: number, lo: number, hi: number): number =>
@@ -75,10 +82,13 @@ export function sanitizeMotionSettings(raw: unknown): MotionSettings {
     ledDensity: num(r.ledDensity, d.ledDensity, L.ledDensity.min, L.ledDensity.max),
     ledWaveSpeed: num(r.ledWaveSpeed, d.ledWaveSpeed, L.ledWaveSpeed.min, L.ledWaveSpeed.max),
     ledCross: num(r.ledCross, d.ledCross, L.ledCross.min, L.ledCross.max),
+    ledWaveThick: num(r.ledWaveThick, d.ledWaveThick, L.ledWaveThick.min, L.ledWaveThick.max),
+    ledWaveBright: num(r.ledWaveBright, d.ledWaveBright, L.ledWaveBright.min, L.ledWaveBright.max),
     laserSpread: num(r.laserSpread, d.laserSpread, L.laserSpread.min, L.laserSpread.max),
     laserSpeed: num(r.laserSpeed, d.laserSpeed, L.laserSpeed.min, L.laserSpeed.max),
     laserChaos: num(r.laserChaos, d.laserChaos, L.laserChaos.min, L.laserChaos.max),
     laserMaxCount: num(r.laserMaxCount, d.laserMaxCount, L.laserMaxCount.min, L.laserMaxCount.max),
+    waveWidth: num(r.waveWidth, d.waveWidth, L.waveWidth.min, L.waveWidth.max),
   }
 }
 

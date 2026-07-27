@@ -21,6 +21,7 @@ import { decideUpdate, reduceDecision, canOpenUrl, settleSkip, type ActiveDecisi
 import { localChangeEventFrom } from './local-history'
 import { ageProgress, type PlaybackProgress } from './nowplaying/progress'
 import type { TrackMeta } from './nowplaying/types'
+import { collectPerfEnv } from './perf-env'
 
 /** 封面 128px 缩略落盘（idea 批0）：nativeImage 薄壳留在接线侧，history.ts 纯逻辑零 electron 依赖。
  * 已存在跳过=按歌去重；解码失败/写失败只 warn 不阻断（封面是增强不是主体） */
@@ -51,6 +52,11 @@ function artworkToDataUrl(bytes: Buffer, reportedMime: string | null): string {
 let win: BrowserWindow | null = null
 let quitting = false
 
+// 启动里程碑（性能基线）：timeOrigin 只覆盖 renderer 导航之后，
+// 主进程启动/建窗这两段必须在主进程侧打点，经 IPC 下发给渲染层拼接
+const perfProcessStartMs = performance.now()
+let perfWindowCreatedMs = 0
+
 // 导出诊断（发布准备③）：环形事件日志，纯内存零落盘；模块级单例——saveArtworkThumb 等
 // app.whenReady 之外的函数也要埋点
 const diagLog = new DiagnosticsLog()
@@ -75,10 +81,14 @@ function createWindow(bounds: WinBounds | null): BrowserWindow {
     }
   })
   if (process.env['ELECTRON_RENDERER_URL']) {
-    win.loadURL(process.env['ELECTRON_RENDERER_URL'])
+    // 性能基线便利：AUDELYRA_PERF=1（npm run dev:perf）时启动直落 #perf 入口，免去手动改 hash。
+    // 仅 dev（loadURL 分支）生效；打包版无此环境变量，不受影响
+    const perfHash = process.env['AUDELYRA_PERF'] === '1' ? '#perf' : ''
+    win.loadURL(process.env['ELECTRON_RENDERER_URL'] + perfHash)
   } else {
     win.loadFile(join(__dirname, '../renderer/index.html'))
   }
+  perfWindowCreatedMs = performance.now()
   return win
 }
 
@@ -446,6 +456,54 @@ app.whenReady().then(() => {
       const duration = typeof r['duration'] === 'number' && Number.isFinite(r['duration']) ? r['duration'] : null
       return lyricsService.lookup(r['title'], r['artist'], duration)
     })
+
+    // 性能基准环境（性能基线）：仅 dev 注册，打包版第二步再开。
+    // collectPerfEnv 静态 import（顶部）——handler 同步注册，杜绝渲染层早于动态 import 完成而撞空 handler
+    if (!app.isPackaged) {
+      /** bench 期间强制标准窗口消除尺寸变量；返回原尺寸供跑完恢复。
+       * 两个坑（本仓 windows.ts 有血泪先例）：
+       * ① 全屏态下 getSize() 返回的是全屏分辨率，不是用户的窗口尺寸——用 getNormalBounds()
+       *    取「恢复态」尺寸，它天然排除全屏/最大化，无论当前什么状态都拿到真实窗口大小。
+       * ② setFullScreen(false) 在 macOS 是异步过渡：必须等 leave-full-screen 再 setSize，
+       *    否则 1280×800 会被转场吞掉（windows.ts 的 pendingAfterLeave 同款教训）。
+       * 故 handler 为 async——调用方本就 await 它。 */
+      ipcMain.handle('perf:standardizeWindow', async () => {
+        if (!win) return null
+        const normal = win.getNormalBounds() // 全屏态也能拿到真实恢复尺寸
+        const prev = { w: normal.width, h: normal.height }
+        if (win.isFullScreen()) {
+          const w = win
+          await new Promise<void>((resolve) => {
+            // 超时兜底：leave-full-screen 在窗口非前台/快速连切等情况下已知可能延迟或不触发，
+            // macOS 不做「必定触发」的保证。一次性 Promise 无「下次纠偏」机会，不兜底就永久挂起、
+            // 「跑基准」按钮无声卡死。3s 后无论如何放行并摘掉陈旧监听器（否则它会在未来某次
+            // 无关的全屏切换里被误触发，把窗口尺寸改乱）。
+            const onLeave = (): void => { clearTimeout(timer); resolve() }
+            const timer = setTimeout(() => { w.removeListener('leave-full-screen', onLeave); resolve() }, 3000)
+            w.once('leave-full-screen', onLeave)
+            w.setFullScreen(false)
+          })
+        }
+        // await 期间窗口可能被销毁（Cmd+Q 走 closed → win=null）：重新守卫，同 sendToRenderer 风格
+        if (!win || win.isDestroyed()) return null
+        win.setSize(1280, 800)
+        return prev
+      })
+      ipcMain.handle('perf:restoreWindow', (_e, size: { w: number; h: number }) => {
+        if (!win || !size) return
+        win.setSize(size.w, size.h)
+      })
+      ipcMain.handle('perf:getEnv', async () => (win ? collectPerfEnv(win) : null))
+      ipcMain.handle('perf:getStartupMarks', () => ({
+        processStartMs: perfProcessStartMs,
+        windowCreatedMs: perfWindowCreatedMs,
+        // 时钟桥：主进程与渲染层的 performance.now() 零点不同源，
+        // 靠墙钟换算才能把两侧里程碑放进同一坐标系
+        mainNowMs: performance.now(),
+        mainWallMs: Date.now(),
+      }))
+    }
+
     let lastLyricsMsg: unknown = null // 与 lastTrackMsg 同因：did-finish-load 补发
     let lastLyricsKey: string | null = null
     let lyricsHit = false // 当前歌命中歌词才值得轮询进度

@@ -1,7 +1,7 @@
 // 封面/星云运动方言（Phase C2，spec §4/§5）：第一个 MotionProgram——语法（尺度分层/事件波前/
 // 叙事加成）在此翻译成方言 uniform；粒子 kernel/材质是纯消费者。
 // 分工纪律：方言 9 uniform 只由本类覆写（index.ts 头部注释为锚）；不碰 SignalRig 名下 14 uniform。
-import { EnvelopeFollower, Pulse } from '../../shared/motion'
+import { ArPulse, EnvelopeFollower, Pulse } from '../../shared/motion'
 import type { NarrativePhase, NarrativeState } from '../../../engine/narrative'
 import { climaxScale, type MotionSettings } from './types'
 
@@ -44,14 +44,16 @@ const BUILD_DIM_MAX = 0.3 // 蓄力最深时变暗 30%
 const RELEASE_DIM_MAX = 0.12 // 尾音消散轻压 12%（图 8 的亮度语义）
 const NARR_DIM_FLOOR = 0.5 // 变暗下限：叙事不许把画面压死
 
-const MAP_SPEED_SPAN = 0.6 // 映射速度跨度：mapSpeed=1 时波前速率 ×1.6（手感，亲验调）
-const MAP_DENSITY_SPAN = 0.8 // 映射密度跨度：mapDensity=1 时细闪幅度 ×1.8（手感，亲验调）
+const MAP_SPEED_SPAN = 1.0 // 映射速度跨度：mapSpeed=1 时波前速率 ×2（0.6→1.0：滑块全行程可感，亲验调）
+const MAP_DENSITY_SPAN = 1.4 // 映射密度跨度：mapDensity=1 时细闪幅度 ×2.4（0.8→1.4：滑块全行程可感，亲验调）
 
 export class NebulaMotionProgram implements MotionProgram {
   private t = 0
   private lastFlashT = -Infinity
   private prevPhase: NarrativePhase = 'steady'
-  private flash = new Pulse(0.06) // 闪白极短半衰：一闪即逝，余韵交给 bloom
+  // 闪光包络（#光效精修 ③）：由瞬时 Pulse 改 ArPulse——50ms attack「涌起」+ 140ms 半衰「回落」，
+  // 消掉原来「啪」地跳白的生硬感；峰值幅度不变（光敏安全门/封顶原样），只让起落更顺、更精致
+  private flash = new ArPulse(0.05, 0.14)
   private chroma = new Pulse(0.05) // 色散更短：近似"单帧撕裂"
   private squeeze = new EnvelopeFollower(0.6, 0.15) // 蓄力缓收（酝酿感）、爆发瞬间快松手（释放感）
 

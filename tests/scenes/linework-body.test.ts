@@ -6,7 +6,7 @@ import { BIN_COUNT } from '../../src/scenes/nebula/linework/spectrum-bins'
 const inp = (over: Partial<Parameters<LineworkBody['update']>[1]> = {}) => ({
   bins: new Float32Array(BIN_COUNT), kickEnv: 0, drop: 0, sleep: 0, energy: 0.5,
   opacity: 1, colorA: new THREE.Color(0.3, 0.5, 1), colorC: new THREE.Color(0.9, 0.95, 1),
-  brightness: 1, barHeight: 1, pulseSpace: 0, pulseBright: 0,
+  brightness: 1, barHeight: 1, waveWidth: 1, pulseSpace: 0, pulseBright: 0,
   mapDensity: 0, mapThick: 0, ...over,
 })
 

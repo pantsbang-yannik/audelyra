@@ -77,9 +77,11 @@ export class LaserBody {
       .mul(this.uDrop.mul(DROP_BOOST).add(1))
       .mul(float(1).sub(this.uSleep.mul(0.85)))
       .mul(this.uOpacity).mul(this.uUserBright)
-      .mul(this.uPulseBright.mul(0.18).add(1))
+      .mul(this.uPulseBright.mul(0.3).add(1))
     // drop 时白化(colorC 偏白),平时低强度=主色、束芯=高光色
-    const albedo = mix(vec3(this.uColA), vec3(this.uColC), clamp(intensity.mul(0.5).add(this.uDrop.mul(0.4)), 0.0, 1.0))
+    // 色温层次（#光效精修 ③·推广）：原始 intensity + 高门槛 smoothstep 替代 clamp，腰部保饱和 uColA(显封面/背景色)、
+    // 只有最亮核心才白；drop 折进 driver 保留爆点增白
+    const albedo = mix(vec3(this.uColA), vec3(this.uColC), smoothstep(2.0, 5.5, intensity.add(this.uDrop.mul(1.5))))
     this.mat.colorNode = albedo.mul(intensity)
     this.mat.opacityNode = clamp(intensity, 0.0, 1.0)
 

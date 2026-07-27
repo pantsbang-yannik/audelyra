@@ -205,5 +205,18 @@ contextBridge.exposeInMainWorld('audelyra', {
   // 拖入文件 → 真实路径（webUtils，Electron 32+）：视频 500MB 走路径直拷，绝不整包过 IPC
   getPathForFile(f: File): string {
     return webUtils.getPathForFile(f)
+  },
+  // 性能基准（性能基线）：仅 dev 主进程注册对应 handler，打包版调用会 reject
+  perfGetEnv() {
+    return ipcRenderer.invoke('perf:getEnv')
+  },
+  perfStandardizeWindow() {
+    return ipcRenderer.invoke('perf:standardizeWindow')
+  },
+  perfRestoreWindow(size: { w: number; h: number }) {
+    return ipcRenderer.invoke('perf:restoreWindow', size)
+  },
+  perfGetStartupMarks() {
+    return ipcRenderer.invoke('perf:getStartupMarks')
   }
 })

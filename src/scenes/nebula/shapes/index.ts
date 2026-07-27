@@ -2,15 +2,11 @@
 // 高档位是十几万点的 Float32Array 分配；count 只在降级减半时变化，缓存天然有界）。
 import type { ShapePointCloud } from '../cover-points'
 import type { ShapeDef, ShapeId } from './types'
-import { generateSphere } from './sphere'
-import { generateCrystal } from './crystal'
 import { contourCloud } from './contour'
 
 /** 数组序 = B2 卡片序 */
 export const SHAPES: readonly ShapeDef[] = [
   { id: 'nebula', label: '星云', planar: false, generate: null, dialect: 'none' },
-  { id: 'sphere', label: '星球', planar: false, generate: generateSphere, dialect: 'none' },
-  { id: 'crystal', label: '晶体', planar: false, generate: generateCrystal, dialect: 'crystal' },
   { id: 'heart', label: '心脏', planar: false, generate: (c) => contourCloud('heart', c), dialect: 'heart' },
   { id: 'spectrum', label: '频谱环', planar: false, generate: null, dialect: 'none', body: 'spectrum' },
   { id: 'waveform', label: '波形线', planar: false, generate: null, dialect: 'none', body: 'waveform' },

@@ -1,10 +1,23 @@
-import { describe, it, expect } from 'vitest'
+import { describe, it, expect, beforeAll } from 'vitest'
 import { resolveShape, planShapeSwap, shapeSelectionChanged, planRefreshAction, isBackfillReveal, type ResolvedKind, type ResolvedShape } from '../../src/scenes/nebula/shapes/resolve'
 import { generateShape } from '../../src/scenes/nebula/shapes'
 import { SHAPE_IDS } from '../../src/scenes/nebula/shapes/types'
+import { loadContourAssets, contourCloud } from '../../src/scenes/nebula/shapes/contour'
 import type { ShapePointCloud } from '../../src/scenes/nebula/cover-points'
 
 const coverCloud = { positions: new Float32Array(9), colors: new Float32Array(9) }
+
+// 星球/晶体退役后，唯一的几何生成形状是 heart（异步轮廓）——几何路径用例统一用它当代表，
+// 先加载 fake 轮廓资产让 generateShape('heart', n) 同步可得点云（布局同 shapes.test.ts）
+beforeAll(async () => {
+  if (contourCloud('heart', 1)) return
+  const N = 200
+  const buf = new Float32Array(N * 6)
+  for (let i = 0; i < N * 3; i++) buf[i] = i * 0.001
+  for (let i = N * 3; i < N * 6; i++) buf[i] = 1
+  const fetchAsset = async (_id: string): Promise<Uint8Array> => new Uint8Array(buf.buffer)
+  await new Promise<void>((resolve) => loadContourAssets(fetchAsset as never, (ready) => { if (ready === 'heart') resolve() }))
+})
 
 describe('resolveShape 全组合（4 形状 × 开关 × 有无封面，spec §5）', () => {
   it('coverPriority=on + 有封面 → 恒为 cover（骑在所有形状之上），planar/hasColor 全真', () => {
@@ -14,14 +27,14 @@ describe('resolveShape 全组合（4 形状 × 开关 × 有无封面，spec §5
     }
   })
   it('coverPriority=off（即使有封面）→ 所选形状说了算；封面不劫持吸附目标', () => {
-    const r = resolveShape({ current: 'sphere', coverPriority: false, coverCloud, custom: null, count: 100 })
+    const r = resolveShape({ current: 'heart', coverPriority: false, coverCloud, custom: null, count: 100 })
     expect(r.kind).toBe('geometry')
-    expect(r.target).toBe(generateShape('sphere', 100)) // 记忆化同引用
+    expect(r.target).toBe(generateShape('heart', 100)) // 记忆化同引用
     expect(r.planar).toBe(false)
     expect(r.hasColor).toBe(false)
   })
   it('无封面 + 几何形状 → geometry；无封面 + 星云 → free（target null）', () => {
-    expect(resolveShape({ current: 'sphere', coverPriority: true, coverCloud: null, custom: null, count: 50 }).kind).toBe('geometry')
+    expect(resolveShape({ current: 'heart', coverPriority: true, coverCloud: null, custom: null, count: 50 }).kind).toBe('geometry')
     const free = resolveShape({ current: 'nebula', coverPriority: true, coverCloud: null, custom: null, count: 50 })
     expect(free).toEqual({ target: null, kind: 'free', planar: false, hasColor: false, dialect: 'none', body: 'particles' })
   })
@@ -71,8 +84,8 @@ describe('planShapeSwap（spec §4.3 N1：跨 cover 边界必须溶解，uniform
 })
 
 describe('shapeSelectionChanged（spec §4.6 防误唤醒铁律）', () => {
-  const a = { current: 'nebula' as const, customCurrent: null, customShapes: [], coverPriority: true }
-  const b = { current: 'sphere' as const, customCurrent: null, customShapes: [], coverPriority: true }
+  const a = { current: 'nebula' as const, customCurrent: null, customShapes: [], coverPriority: true, showBody: true }
+  const b = { current: 'heart' as const, customCurrent: null, customShapes: [], coverPriority: true, showBody: true }
   it('未播种（启动/重建重放）永不触发，即使值不同', () => {
     expect(shapeSelectionChanged(a, b, false)).toBe(false)
   })
@@ -123,33 +136,20 @@ describe('planRefreshAction（B1 终审记账：决策核抽纯函数，C1/N1 �
 })
 
 describe('方言家族传导（方言期批1）', () => {
-  it('geometry：家族来自注册表（heart=heart/crystal=crystal/sphere=none；contour 家族由序幕 demo 形体沿用）', () => {
-    const cases = [
-      ['heart', 'heart'], ['crystal', 'crystal'], ['sphere', 'none'],
-    ] as const
-    for (const [id, family] of cases) {
-      const r = resolveShape({ current: id, coverPriority: false, coverCloud: null, custom: null, count: 100 })
-      // heart 资产未就绪时 kind=free（回退星云），family 也必须回 none——见下一用例；
-      // 本用例只断言同步生成器形状
-      if (r.kind === 'geometry') expect(r.dialect).toBe(family)
-    }
-    const crystal = resolveShape({ current: 'crystal', coverPriority: false, coverCloud: null, custom: null, count: 100 })
-    expect(crystal.dialect).toBe('crystal') // 至少一个确定命中的显式断言，防上面全走 if 空转
+  it('geometry：家族来自注册表（heart=heart；contour 家族由序幕 demo 形体沿用；星球/晶体已退役）', () => {
+    const r = resolveShape({ current: 'heart', coverPriority: false, coverCloud: null, custom: null, count: 100 })
+    expect(r.kind).toBe('geometry') // beforeAll 已加载轮廓资产
+    expect(r.dialect).toBe('heart')
   })
   it('cover / free 一律 none（封面走 uTargetPlanar 既有约束，自由态无方言）', () => {
     const cover = resolveShape({
-      current: 'crystal', coverPriority: true,
+      current: 'heart', coverPriority: true,
       coverCloud: { positions: new Float32Array(3) }, custom: null, count: 1,
     })
     expect(cover.dialect).toBe('none')
     const free = resolveShape({ current: 'nebula', coverPriority: false, coverCloud: null, custom: null, count: 1 })
     expect(free.kind).toBe('free')
     expect(free.dialect).toBe('none')
-  })
-
-  it('批2：crystal 从注册表传导自己的家族', () => {
-    const crystal = resolveShape({ current: 'crystal', coverPriority: false, coverCloud: null, custom: null, count: 100 })
-    expect(crystal.dialect).toBe('crystal')
   })
 })
 
@@ -173,29 +173,29 @@ describe('resolveShape · 自定义形状注入（idea #12）', () => {
   const cloud = { positions: new Float32Array(3) }
 
   it('选中自定义图片：kind=custom，薄板+像素色（与封面同标定）', () => {
-    const r = resolveShape({ current: 'sphere', coverPriority: true, coverCloud: null, custom: { cloud, kind: 'image' }, count: 8 })
+    const r = resolveShape({ current: 'heart', coverPriority: true, coverCloud: null, custom: { cloud, kind: 'image' }, count: 8 })
     expect(r).toMatchObject({ target: cloud, kind: 'custom', planar: true, hasColor: true, dialect: 'none' })
   })
 
   it('选中自定义文字：薄板鼓面（fb1：与图片同标定，阅读性=封面同款）+情绪三色', () => {
-    const r = resolveShape({ current: 'sphere', coverPriority: true, coverCloud: null, custom: { cloud, kind: 'text' }, count: 8 })
+    const r = resolveShape({ current: 'heart', coverPriority: true, coverCloud: null, custom: { cloud, kind: 'text' }, count: 8 })
     expect(r).toMatchObject({ kind: 'custom', planar: true, hasColor: false })
   })
 
   it('封面优先仍压过自定义（规则不特殊化）', () => {
     const coverCloud = { positions: new Float32Array(3) }
-    const r = resolveShape({ current: 'sphere', coverPriority: true, coverCloud, custom: { cloud, kind: 'image' }, count: 8 })
+    const r = resolveShape({ current: 'heart', coverPriority: true, coverCloud, custom: { cloud, kind: 'image' }, count: 8 })
     expect(r.kind).toBe('cover')
     expect(r.target).toBe(coverCloud)
   })
 
   it('选中自定义但点云未就绪（加载中/失败）→ free 回退，就绪后重仲裁自然补切', () => {
-    const r = resolveShape({ current: 'sphere', coverPriority: false, coverCloud: null, custom: { cloud: null, kind: 'image' }, count: 8 })
+    const r = resolveShape({ current: 'heart', coverPriority: false, coverCloud: null, custom: { cloud: null, kind: 'image' }, count: 8 })
     expect(r.kind).toBe('free')
   })
 
   it('未选自定义（custom=null）→ 走内置 generate 老路', () => {
-    const r = resolveShape({ current: 'sphere', coverPriority: false, coverCloud: null, custom: null, count: 8 })
+    const r = resolveShape({ current: 'heart', coverPriority: false, coverCloud: null, custom: null, count: 8 })
     expect(r.kind).toBe('geometry')
   })
 })
@@ -227,7 +227,7 @@ describe('isBackfillReveal · custom 迟到就绪也享补切仪式', () => {
 })
 
 describe('shapeSelectionChanged · customCurrent 纳入变更判定', () => {
-  const base = { current: 'nebula' as const, customCurrent: null, customShapes: [], coverPriority: true }
+  const base = { current: 'nebula' as const, customCurrent: null, customShapes: [], coverPriority: true, showBody: true }
   it('只改 customCurrent 也算用户切换', () => {
     expect(shapeSelectionChanged(base, { ...base, customCurrent: '00000000-0000-4000-8000-000000000000' }, true)).toBe(true)
   })

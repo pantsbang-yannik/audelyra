@@ -1,4 +1,4 @@
-// 调音台契约（调音台规范化 spec §契约）：主体类 → 形状专属 tab 分组声明的单一事实源。
+// 调音台契约（调音台规范化 spec §契约）：主体类 → 主体 tab 分组声明的单一事实源。
 // 面板照表渲染（tuning-panel.buildShapeSection）——新形状属现有 body 类零改动，
 // 新 body 类在此加一条声明即可，不碰面板代码。量程不在此重复：key 引用 MOTION_LIMITS。
 import type { MotionSettings } from '../motion/types'
@@ -45,11 +45,20 @@ const STROBE_TOGGLE: MixerToggleDef = {
 const motionGroup = (title: string): MixerGroupDef =>
   ({ title, scope: 'class', knobs: MOTION_KNOBS, toggles: [STROBE_TOGGLE] })
 
-const LINE_GROUP: MixerGroupDef = {
-  title: '线条（频谱环/波形线）', scope: 'class',
+const LINE_BRIGHT_KNOB: MixerKnobDef = { key: 'lineBrightness', label: '线条亮度', help: '环线/波形线与频谱条的整体亮度' }
+const LINE_BARH_KNOB: MixerKnobDef = { key: 'lineBarHeight', label: '柱高范围', help: '频谱条的最大长度（环上外伸与波形上下摆幅同调）' }
+
+// 频谱环：亮度 + 柱高（环形无「整体宽度」概念，不含 waveWidth）
+const SPECTRUM_GROUP: MixerGroupDef = {
+  title: '线条（频谱环）', scope: 'class',
+  knobs: [LINE_BRIGHT_KNOB, LINE_BARH_KNOB],
+}
+// 波形线：亮度 + 柱高 + 横向宽度（波形线专属——左右铺展幅度）
+const WAVEFORM_GROUP: MixerGroupDef = {
+  title: '线条（波形线）', scope: 'class',
   knobs: [
-    { key: 'lineBrightness', label: '线条亮度', help: '环线/波形线与频谱条的整体亮度' },
-    { key: 'lineBarHeight', label: '柱高范围', help: '频谱条的最大长度（环上外伸与波形上下摆幅同调）' },
+    LINE_BRIGHT_KNOB, LINE_BARH_KNOB,
+    { key: 'waveWidth', label: '整体宽度', help: '波形线左右铺展的幅度：小=集中在中间，大=铺满整个画面宽' },
   ],
 }
 
@@ -66,10 +75,11 @@ const ECLIPSE_GROUP: MixerGroupDef = {
 const LEDMATRIX_GROUP: MixerGroupDef = {
   title: '线条（点阵）', scope: 'class',
   knobs: [
-    { key: 'lineBrightness', label: '线条亮度', help: '图形整体亮度（线条系各卡共用一个值）' },
+    { key: 'ledWaveBright', label: '环波亮度', help: '只调鼓点环波的亮度（不影响其他方块；整墙底色固定）' },
     { key: 'ledDensity', label: '格子密度', help: '越大格子越小越密' },
     { key: 'ledWaveSpeed', label: '环波速度', help: '鼓点环波扩散的快慢' },
     { key: 'ledCross', label: '十字亮度', help: '中心十字光束强度（0=关闭十字）' },
+    { key: 'ledWaveThick', label: '环波粗细', help: '鼓点扩散环波光带的厚度：小=细亮圈，大=粗晕' },
   ],
 }
 const LASER_GROUP: MixerGroupDef = {
@@ -86,8 +96,8 @@ const LASER_GROUP: MixerGroupDef = {
 /** body → 分组清单；渲染序=数组序 */
 export const BODY_MIXER_GROUPS: Record<BodyKind, MixerGroupDef[]> = {
   particles: [motionGroup('运动（封面/星云）')],
-  spectrum: [motionGroup('运动（封面接管时生效）'), LINE_GROUP],
-  waveform: [motionGroup('运动（封面接管时生效）'), LINE_GROUP],
+  spectrum: [motionGroup('运动（封面接管时生效）'), SPECTRUM_GROUP],
+  waveform: [motionGroup('运动（封面接管时生效）'), WAVEFORM_GROUP],
   eclipse: [motionGroup('运动（封面接管时生效）'), ECLIPSE_GROUP],
   ledmatrix: [motionGroup('运动（封面接管时生效）'), LEDMATRIX_GROUP],
   laser: [motionGroup('运动（封面接管时生效）'), LASER_GROUP],

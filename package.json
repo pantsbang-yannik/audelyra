@@ -1,11 +1,12 @@
 {
   "name": "audelyra",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "Audelyra — 让声音显形",
   "main": "./out/main/main.js",
   "scripts": {
     "predev": "test -x native/mac-tap/audelyra-tap || bash native/mac-tap/build.sh",
     "dev": "electron-vite dev",
+    "dev:perf": "AUDELYRA_PERF=1 npm run dev",
     "build": "electron-vite build",
     "test": "vitest run",
     "test:watch": "vitest",

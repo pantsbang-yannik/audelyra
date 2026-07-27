@@ -9,7 +9,9 @@ import { sanitizeCameraSettings, DEFAULT_CAMERA_SETTINGS, type CameraSettings } 
 import { sanitizeTitleSettings, DEFAULT_TITLE_SETTINGS, type TitleSettings } from '../src/scenes/nebula/title-fx'
 import { sanitizeLyricsSettings, DEFAULT_LYRICS_SETTINGS, type LyricsSettings } from '../src/scenes/nebula/lyrics/lyrics-fx'
 import { sanitizeBackgroundSettings, DEFAULT_BACKGROUND_SETTINGS, type BackgroundSettings } from '../src/scenes/nebula/background-types'
+import { sanitizeMacroKnobs, DEFAULT_MACRO_KNOBS, type MacroKnobs } from '../src/scenes/nebula/mapping/macro'
 import { parseSemver } from './update/protocol'
+import { bodyVisibilityLink, BUILTIN_BACKGROUND_ID } from '../src/scenes/nebula/body-visibility-link'
 
 export type TierSetting = 'auto' | 'high' | 'mid' | 'low'
 
@@ -38,8 +40,10 @@ export interface AudelyraSettings {
   preventSleep: boolean
   onboarded: boolean
   mapping: MappingValues        // ← 新增：音频→视觉映射用户存档
+  macroKnobs: MacroKnobs        // ← 二期标准层：风格档 + 劲儿/跟手两个标量，mapping 的「源」
+  tuningAdvancedExpanded: boolean // ← 律动页「高级调整」折叠态：普通用户默认收起，玩家展开后跨重启记住
   shape: ShapeSettings          // ← Phase B1：形状选择 + 封面优先
-  motion: MotionSettings        // ← Phase C2：形状专属 tab 的运动手感旋钮
+  motion: MotionSettings        // ← Phase C2：主体 tab 的运动手感旋钮
   camera: CameraSettings        // ← Phase D：镜头运镜活跃度旋钮
   lyrics: LyricsSettings        // ← 歌词二期：显示/大小/节奏动态/亮度
   background: BackgroundSettings // ← 虚空之镜：极光/涟漪/尘埃密度
@@ -54,6 +58,8 @@ export const DEFAULT_SETTINGS: AudelyraSettings = {
   preventSleep: false,
   onboarded: false,
   mapping: defaultRhythmPreset(),  // ← 新增
+  macroKnobs: DEFAULT_MACRO_KNOBS,
+  tuningAdvancedExpanded: false,
   shape: DEFAULT_SHAPE_SETTINGS,
   motion: DEFAULT_MOTION_SETTINGS,
   camera: DEFAULT_CAMERA_SETTINGS,
@@ -81,6 +87,17 @@ function sanitizeWinBounds(v: unknown): WinBounds | null {
 export function sanitizeSettings(raw: unknown): AudelyraSettings {
   const r = (typeof raw === 'object' && raw !== null ? raw : {}) as Record<string, unknown>
   const bool = (v: unknown, d: boolean): boolean => (typeof v === 'boolean' ? v : d)
+  const background = sanitizeBackgroundSettings(r.background)
+  const shape = sanitizeShapeSettings(r.shape)
+  // 老存档迁移：旧版该开关是 background.bgShowBodies（默认 false，仅自定义背景下有效），
+  // 新语义默认 true。直接翻转会让正在用自定义背景的老用户突然冒出主体 → 按升级前的观感推导。
+  // 只在新字段缺失时生效，故迁移过一次后不再干预用户选择。
+  const rawShape = (typeof r.shape === 'object' && r.shape !== null ? r.shape : {}) as Record<string, unknown>
+  const rawBg = (typeof r.background === 'object' && r.background !== null ? r.background : {}) as Record<string, unknown>
+  if (typeof rawShape.showBody !== 'boolean') {
+    const usingCustomBg = background.current !== BUILTIN_BACKGROUND_ID
+    shape.showBody = !(usingCustomBg && rawBg.bgShowBodies !== true)
+  }
   return {
     tier: TIER_VALUES.includes(r.tier as string) ? (r.tier as TierSetting) : DEFAULT_SETTINGS.tier,
     // 旧字段 showParticleTitle（本功能首版布尔）作迁移输入：false → mode 'off'
@@ -90,11 +107,13 @@ export function sanitizeSettings(raw: unknown): AudelyraSettings {
     preventSleep: bool(r.preventSleep, DEFAULT_SETTINGS.preventSleep),
     onboarded: bool(r.onboarded, DEFAULT_SETTINGS.onboarded),
     mapping: sanitizeMappingValues(r.mapping),  // ← 新增
-    shape: sanitizeShapeSettings(r.shape),
+    macroKnobs: sanitizeMacroKnobs(r.macroKnobs),
+    tuningAdvancedExpanded: bool(r.tuningAdvancedExpanded, DEFAULT_SETTINGS.tuningAdvancedExpanded),
+    shape,
     motion: sanitizeMotionSettings(r.motion),
     camera: sanitizeCameraSettings(r.camera),
     lyrics: sanitizeLyricsSettings(r.lyrics),
-    background: sanitizeBackgroundSettings(r.background),
+    background,
     updateCheck: sanitizeUpdateCheck(r.updateCheck)
   }
 }
@@ -113,6 +132,7 @@ export class SettingsStore {
       ...this.current,
       winBounds: this.current.winBounds ? { ...this.current.winBounds } : null,
       mapping: JSON.parse(JSON.stringify(this.current.mapping)),
+      macroKnobs: { ...this.current.macroKnobs },
       shape: { ...this.current.shape, customShapes: this.current.shape.customShapes.map((m) => ({ ...m })) },
       motion: { ...this.current.motion },
       camera: { ...this.current.camera },
@@ -127,9 +147,16 @@ export class SettingsStore {
    * winBounds/mapping/shape 每次 sanitize 都会生成新对象引用，逐键 !== 比较对它们必然误判为"变了"——
    * 这些对象字段改按值比较（JSON），其余标量字段仍用 !== */
   set(patch: Partial<AudelyraSettings>): AudelyraSettings {
-    const next = sanitizeSettings({ ...this.current, ...patch })
+    const merged = sanitizeSettings({ ...this.current, ...patch })
+    // 主体显隐联动（判定在纯函数里，此处只接线）：背景在内置↔自定义间跨越 ⇒ 关/开主体；
+    // 换形状 ⇒ 开主体。与本次写入同一轮 sanitize/落盘/广播，避免二次写入引发回声
+    const linked = bodyVisibilityLink(
+      { backgroundCurrent: this.current.background.current, shapeCurrent: this.current.shape.current, shapeCustomCurrent: this.current.shape.customCurrent },
+      { backgroundCurrent: merged.background.current, shapeCurrent: merged.shape.current, shapeCustomCurrent: merged.shape.customCurrent },
+    )
+    const next = linked === null ? merged : { ...merged, shape: { ...merged.shape, showBody: linked } }
     // shape 与 winBounds/mapping 同罪：sanitize 每次生成新引用，逐键 !== 必然误判（评审 I4）
-    const OBJECT_KEYS = new Set<keyof AudelyraSettings>(['winBounds', 'mapping', 'shape', 'motion', 'camera', 'title', 'lyrics', 'background', 'updateCheck'])
+    const OBJECT_KEYS = new Set<keyof AudelyraSettings>(['winBounds', 'mapping', 'macroKnobs', 'shape', 'motion', 'camera', 'title', 'lyrics', 'background', 'updateCheck'])
     const changed = (Object.keys(next) as Array<keyof AudelyraSettings>).some((k) => {
       if (OBJECT_KEYS.has(k)) return JSON.stringify(next[k]) !== JSON.stringify(this.current[k])
       return next[k] !== this.current[k]

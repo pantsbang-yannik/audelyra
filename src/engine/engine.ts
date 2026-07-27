@@ -4,6 +4,7 @@ import { EnergyTracker } from './energy'
 import { SignalBus } from './bus'
 import { RollingPeak } from './rolling-peak'
 import type { PcmFrame, Signals } from './types'
+import { perf } from '../perf/collector'
 
 /** fb5 力度合成：tie 排名管「段落内谁更狠」，能量语境管「这段整体该不该响」——
  * EnergyTracker 峰谷区间归一追踪全曲新高（不自我归一化），均匀副歌全过线（冷却限流成规律）、
@@ -29,6 +30,9 @@ export class AudelyraEngine {
   private smoothSpectrum: Float32Array | null = null
 
   ingest(frame: PcmFrame): void {
+    // 内部延迟起点（性能基线）：side-channel 打点，不给 Signals 加字段——
+    // Signals 会被 trace 序列化，加字段会污染既有 trace 资产的兼容性
+    if (perf.enabled) perf.markPcmIn(performance.now())
     if (!this.beat || this.sampleRate !== frame.sampleRate) {
       this.sampleRate = frame.sampleRate
       this.beat = new BeatDetector(frame.sampleRate, HOP_SIZE)
@@ -77,6 +81,7 @@ export class AudelyraEngine {
       drop: e.drop,
       silence: e.silence
     }
+    if (perf.enabled) perf.markSignalOut(performance.now())
     this.bus.publish(signals)
   }
 }

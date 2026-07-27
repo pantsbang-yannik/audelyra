@@ -1,6 +1,7 @@
 export class EnvelopeFollower {
   value = 0
-  constructor(private attackSec: number, private releaseSec: number) {}
+  // public：mapper 等消费方需运行中热更时间常数（调音台拖动实时生效）
+  constructor(public attackSec: number, public releaseSec: number) {}
   update(target: number, dt: number): number {
     const tau = target > this.value ? this.attackSec : this.releaseSec
     const a = tau <= 0 ? 1 : 1 - Math.exp(-dt / tau)
@@ -52,11 +53,20 @@ export class ArPulse {
 export class Spring {
   value = 0
   velocity = 0
-  constructor(private freqHz = 2, private damping = 0.7) {}
+  // freqHz public：mapper 由「平滑」滑块派生刚度，需运行中热更
+  constructor(public freqHz = 2, private damping = 0.7) {}
   update(target: number, dt: number): number {
     const w = 2 * Math.PI * this.freqHz
-    this.velocity += (w * w * (target - this.value) - 2 * this.damping * w * this.velocity) * dt
-    this.value += this.velocity * dt
+    // 显式积分稳定条件 w·h<2；freqHz 可达 12（mapper 平滑滑块）、dt 可达 0.1（host 卡顿钳），
+    // 单步 w·dt 会破稳发散。把大 dt 拆成 ≤MAX_STEP 的子步积分，保证任意帧率下不爆炸。
+    const MAX_STEP = 0.02 // w·MAX_STEP ≤ 2π·12·0.02 ≈ 1.5 < 2
+    let remaining = dt
+    while (remaining > 1e-6) {
+      const h = Math.min(remaining, MAX_STEP)
+      this.velocity += (w * w * (target - this.value) - 2 * this.damping * w * this.velocity) * h
+      this.value += this.velocity * h
+      remaining -= h
+    }
     return this.value
   }
 }

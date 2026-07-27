@@ -1,4 +1,4 @@
-// 镜头运镜设置（Phase D）：调音台「通用调试」tab 镜头分组的旋钮，electron settings.camera 字段持久化。
+// 镜头运镜设置（Phase D）：调音台「镜头」tab 的旋钮，electron settings.camera 字段持久化。
 // liveliness 只乘新运镜手法（环绕/FOV 冲击/drop 拉远），不碰呼吸/漂移/微震——它们已有 calm 门控，双重缩放会语义混乱（spec §6）。
 // distScale 是站位远近的个人偏好：等比缩放所有机位距离，机位间比例关系/呼吸幅度自然跟随。
 export interface CameraSettings {

@@ -6,17 +6,18 @@ import type { ShapePointCloud } from '../cover-points'
 export type DemoShapeId = 'demo-gramophone' | 'demo-cassette' | 'demo-headphones' | 'demo-mic'
 export const DEMO_SHAPE_IDS: readonly DemoShapeId[] = ['demo-gramophone', 'demo-cassette', 'demo-headphones', 'demo-mic']
 
-export type ShapeId = 'nebula' | 'sphere' | 'crystal' | 'heart' | 'spectrum' | 'waveform' | 'eclipse' | 'ledmatrix' | 'laser' | DemoShapeId
+export type ShapeId = 'nebula' | 'heart' | 'spectrum' | 'waveform' | 'eclipse' | 'ledmatrix' | 'laser' | DemoShapeId
 /** 用户可选/可持久化的形状白名单（sanitize 口径）——序幕形体故意不在此列；
- * statue 已退役（发布准备③ 用户拍板删卡）：旧存档选中雕像由 sanitize 打回星云 */
-export const SHAPE_IDS: readonly ShapeId[] = ['nebula', 'sphere', 'crystal', 'heart', 'spectrum', 'waveform', 'eclipse', 'ledmatrix', 'laser']
+ * statue/sphere(星球)/crystal(晶体) 已退役（用户拍板删卡）：旧存档选中它们由 sanitize 打回星云 */
+export const SHAPE_IDS: readonly ShapeId[] = ['nebula', 'heart', 'spectrum', 'waveform', 'eclipse', 'ledmatrix', 'laser']
 
 /** 主体类型（线条系 spec §④+图形三连 spec）：particles=粒子点云（缺省），其余=SDF 线条画板。
  * 选线条卡时粒子主体退场、线条主体登场（编排层 crossfade），歌词/背景/镜头不感知 */
 export type BodyKind = 'particles' | 'spectrum' | 'waveform' | 'eclipse' | 'ledmatrix' | 'laser'
 
 /** 方言家族（方言期批1+批2）：kernel 家族权重门控的 CPU 侧标识。
- * 'contour'=表面法线约束（雕像）；'heart'=法线约束+泵动；'crystal'=晶体 */
+ * 'contour'=表面法线约束（雕像/序幕形体）；'heart'=法线约束+泵动；
+ * 'crystal'=晶体（形状已退役，家族与 uDialCrystal 着色保留为休眠态，恒不触发） */
 export type DialectFamily = 'none' | 'contour' | 'heart' | 'crystal'
 
 /** 自定义形状元数据（idea #12）：只存源数据不存点云——文字存字符串、图片存 userData/custom-shapes/<id>.png，
@@ -55,10 +56,12 @@ export interface ShapeSettings {
   customCurrent: string | null
   customShapes: CustomShapeMeta[]
   coverPriority: boolean
+  /** 显示主体：false=隐藏五路主体（星尘/歌词/歌名不受影响）。选中自定义背景时联动置 false，用户可再打开 */
+  showBody: boolean
 }
 
 // coverPriority 默认关（发布准备③ 用户复调）：首装主角是星云本体，封面接管改为用户主动开启
-export const DEFAULT_SHAPE_SETTINGS: ShapeSettings = { current: 'nebula', customCurrent: null, customShapes: [], coverPriority: false }
+export const DEFAULT_SHAPE_SETTINGS: ShapeSettings = { current: 'nebula', customCurrent: null, customShapes: [], coverPriority: false, showBody: true }
 
 function sanitizeCustomShapes(raw: unknown): CustomShapeMeta[] {
   if (!Array.isArray(raw)) return []
@@ -88,6 +91,7 @@ export function sanitizeShapeSettings(raw: unknown): ShapeSettings {
     customCurrent: cc,
     customShapes,
     coverPriority: typeof r.coverPriority === 'boolean' ? r.coverPriority : DEFAULT_SHAPE_SETTINGS.coverPriority,
+    showBody: typeof r.showBody === 'boolean' ? r.showBody : DEFAULT_SHAPE_SETTINGS.showBody,
   }
 }
 

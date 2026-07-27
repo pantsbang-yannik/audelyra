@@ -1,6 +1,7 @@
 import { createScene } from './registry'
 import type { Scene, SceneTrackEvent, QualityTier, UiFocusProfile, ScenePlaybackProgress, SceneLyricsDoc } from './types'
 import type { SignalBus } from '../engine/bus'
+import { perf } from '../perf/collector'
 import type { MappingValues } from './nebula/mapping/types'
 import type { ShapeSettings } from './nebula/shapes/types'
 import type { MotionSettings } from './nebula/motion/types'
@@ -35,6 +36,7 @@ export class SceneHost {
 
   private readonly afterFrame?: (nowMs: number) => void
   private readonly onInitError?: (sceneName: string, err: unknown) => void
+  private readonly onCameraCommit?: (c: CameraSettings) => void
 
   constructor(
     private canvas: HTMLCanvasElement,
@@ -48,27 +50,30 @@ export class SceneHost {
       /** 场景 init 失败上报（发布准备③ 导出诊断）：WebGPU 初始化失败是「画面不动」类问题的头号嫌犯，
        * 内部 catch 吞掉后 window.onerror 看不见，必须在此显式外送 */
       onInitError?: (sceneName: string, err: unknown) => void
+      /** 镜头设置提交回调（#镜头精修 ①）：场景内滚轮改默认距离时冒泡出来，交由 main.ts 落盘 + 广播 */
+      onCameraCommit?: (c: CameraSettings) => void
     } = {}
   ) {
     this.raf = opts.raf ?? ((cb) => requestAnimationFrame(cb))
     this.caf = opts.caf ?? ((id) => cancelAnimationFrame(id))
     this.afterFrame = opts.afterFrame
     this.onInitError = opts.onInitError
+    this.onCameraCommit = opts.onCameraCommit
   }
 
-  async start(name: string, quality: QualityTier, forcedTier?: QualityTier): Promise<void> {
+  async start(name: string, quality: QualityTier, forcedTier?: QualityTier, trackTimestamp?: boolean): Promise<void> {
     const token = ++this.startToken // 重入防护：只有最新一次 start 有权落地
     this.stop()
     let scene = createScene(name)
     try {
-      await scene.init({ canvas: this.canvas, quality, forcedTier })
+      await scene.init({ canvas: this.canvas, quality, forcedTier, trackTimestamp })
     } catch (err) {
       console.error(`[scene] ${name} init 失败，回退 placeholder`, err)
       this.onInitError?.(name, err)
       try { scene.dispose() } catch { /* 半初始化场景，尽力释放 */ }
       scene = createScene('placeholder')
       try {
-        await scene.init({ canvas: this.canvas, quality, forcedTier })
+        await scene.init({ canvas: this.canvas, quality, forcedTier, trackTimestamp })
       } catch (fatal) {
         console.error('[scene] placeholder 兜底也失败（canvas 可能已被 GPU 上下文占用）', fatal)
         this.onInitError?.('placeholder', fatal)
@@ -86,6 +91,7 @@ export class SceneHost {
     if (this.lastShape) this.scene.applyShape?.(this.lastShape)
     if (this.lastMotion) this.scene.applyMotion?.(this.lastMotion)
     if (this.lastCamera) this.scene.applyCamera?.(this.lastCamera)
+    if (this.onCameraCommit) scene.setCameraCommit?.(this.onCameraCommit)
     if (!this.lastInteractive) scene.setInteractive?.(false)
     if (this.lastTitle) this.scene.applyTitle?.(this.lastTitle)
     if (this.lastLyrics) this.scene.applyLyrics?.(this.lastLyrics)
@@ -193,6 +199,8 @@ export class SceneHost {
   private frame = (now: number): void => {
     const scene = this.scene
     if (!scene) return
+    const probing = perf.enabled // off 态零开销：热路径只读一个布尔
+    if (probing) perf.beginFrame(now)
     const dt = this.lastNow === null ? 0.016 : Math.min((now - this.lastNow) / 1000, 0.1)
     this.lastNow = now
     if (this.pendingTrack) {
@@ -207,6 +215,7 @@ export class SceneHost {
     }
     scene.update(dt, this.bus.takeFrame())
     this.afterFrame?.(now)
+    if (probing) perf.endFrame(performance.now())
     this.rafId = this.raf(this.frame)
   }
 }

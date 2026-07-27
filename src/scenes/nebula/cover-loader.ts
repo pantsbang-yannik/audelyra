@@ -30,6 +30,11 @@ export class CoverController {
   // 不必重新解码/重采样（那会有一帧默认色闪烁 + 多余的图片 decode 开销）
   private lastCloud: ShapePointCloud | null = null
 
+  // 调色源门控（#背景取色 ②）：自定义背景激活时置 true——换歌仍加载封面点云（形状不变），
+  // 但跳过封面调色，让调色总线交给背景取色驱动。lastCoverMood 始终记着最新封面色，切回极光时 tween 回它。
+  private colorSuppressed = false
+  private lastCoverMood: MoodPalette = DEFAULT_MOOD
+
   private readonly colorTween = new Tween()
   private readonly fromA = new THREE.Color()
   private readonly fromB = new THREE.Color()
@@ -89,7 +94,8 @@ export class CoverController {
     this.lastCloud = null
     this.shownKey = null
     this._hasCover = false
-    this.startColorTween(DEFAULT_MOOD, bpm)
+    this.lastCoverMood = DEFAULT_MOOD // 无封面归位色；供切回极光时 reapply
+    if (!this.colorSuppressed) this.startColorTween(DEFAULT_MOOD, bpm) // 背景接管调色期间不碰总线
     this.hooks.onCloudChanged()
     this.hooks.onSettled()
   }
@@ -146,9 +152,26 @@ export class CoverController {
     this.lastCloud = cloud
     this.shownKey = trackKey
     this._hasCover = true
-    this.startColorTween(remapToMood(extractDominant(imageData)), bpm)
+    this.lastCoverMood = remapToMood(extractDominant(imageData)) // 记着封面色（换歌也更新），供切回极光时 reapply
+    if (!this.colorSuppressed) this.startColorTween(this.lastCoverMood, bpm) // 背景接管调色期间只加载形状、不改色
     this.hooks.onCloudChanged()
     this.hooks.onSettled()
+  }
+
+  /** 调色源门控（#背景取色 ②）：on=自定义背景激活，换歌不再用封面色改总线（形状照常加载）。
+   * 关闭门控本身不改色——切回极光的复色由 reapplyCoverColor 显式驱动，两步分离语义清晰。 */
+  setColorSuppressed(on: boolean): void {
+    this.colorSuppressed = on
+  }
+
+  /** 背景取色写入调色总线（#背景取色 ②）：index.ts 切到自定义背景、取到背景 mood 后调用。 */
+  applyExternalMood(mood: MoodPalette, bpm: number | null): void {
+    this.startColorTween(mood, bpm)
+  }
+
+  /** 切回极光时把颜色 tween 回当前封面色（#背景取色 ②）：lastCoverMood 在换歌时持续更新，恒为最新。 */
+  reapplyCoverColor(bpm: number | null): void {
+    this.startColorTween(this.lastCoverMood, bpm)
   }
 
   private startColorTween(mood: MoodPalette, bpm: number | null): void {

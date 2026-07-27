@@ -14,9 +14,9 @@ describe('MotionSettings sanitize（惯例同 sanitizeShapeSettings：坏数据�
     expect(s.buildDepth).toBe(DEFAULT_MOTION_SETTINGS.buildDepth)
     expect(s.strobeEnabled).toBe(DEFAULT_MOTION_SETTINGS.strobeEnabled)
   })
-  it('合法值原样通过（含线条系 fb2 两旋钮、九个专属键与高潮亮度）', () => {
-    const s = sanitizeMotionSettings({ bombIntensity: 1.4, detailDensity: 0.5, waveSpeed: 1.8, buildDepth: 0.3, strobeEnabled: false, climaxBrightness: 1.2, lineBrightness: 1.6, lineBarHeight: 0.8, eclipseWaveLen: 0.7, eclipseWaveGap: 0.5, eclipseCorona: 1.8, ledDensity: 1.6, ledWaveSpeed: 0.8, ledCross: 0.2, laserSpread: 1.2, laserSpeed: 1.7, laserChaos: 0.1, laserMaxCount: 6 })
-    expect(s).toEqual({ bombIntensity: 1.4, detailDensity: 0.5, waveSpeed: 1.8, buildDepth: 0.3, strobeEnabled: false, climaxBrightness: 1.2, lineBrightness: 1.6, lineBarHeight: 0.8, eclipseWaveLen: 0.7, eclipseWaveGap: 0.5, eclipseCorona: 1.8, ledDensity: 1.6, ledWaveSpeed: 0.8, ledCross: 0.2, laserSpread: 1.2, laserSpeed: 1.7, laserChaos: 0.1, laserMaxCount: 6 })
+  it('合法值原样通过（含线条系 fb2 两旋钮、九个专属键、高潮亮度、环波粗细/波形宽度）', () => {
+    const s = sanitizeMotionSettings({ bombIntensity: 1.4, detailDensity: 0.5, waveSpeed: 1.8, buildDepth: 0.3, strobeEnabled: false, climaxBrightness: 1.2, lineBrightness: 1.6, lineBarHeight: 0.8, eclipseWaveLen: 0.7, eclipseWaveGap: 0.5, eclipseCorona: 1.8, ledDensity: 1.6, ledWaveSpeed: 0.8, ledCross: 0.2, ledWaveThick: 1.5, ledWaveBright: 0.7, laserSpread: 1.2, laserSpeed: 1.7, laserChaos: 0.1, laserMaxCount: 6, waveWidth: 0.8 })
+    expect(s).toEqual({ bombIntensity: 1.4, detailDensity: 0.5, waveSpeed: 1.8, buildDepth: 0.3, strobeEnabled: false, climaxBrightness: 1.2, lineBrightness: 1.6, lineBarHeight: 0.8, eclipseWaveLen: 0.7, eclipseWaveGap: 0.5, eclipseCorona: 1.8, ledDensity: 1.6, ledWaveSpeed: 0.8, ledCross: 0.2, ledWaveThick: 1.5, ledWaveBright: 0.7, laserSpread: 1.2, laserSpeed: 1.7, laserChaos: 0.1, laserMaxCount: 6, waveWidth: 0.8 })
   })
   it('线条系旋钮：出界钳限幅、缺字段回默认（老落盘设置无这两字段=平滑升级）', () => {
     const s = sanitizeMotionSettings({ lineBrightness: 99, lineBarHeight: 0 })
@@ -37,6 +37,17 @@ describe('MotionSettings sanitize（惯例同 sanitizeShapeSettings：坏数据�
     expect(s.laserSpread).toBe(MOTION_LIMITS.laserSpread.max)
     expect(s.laserSpeed).toBe(MOTION_LIMITS.laserSpeed.max)
     expect(s.laserChaos).toBe(MOTION_LIMITS.laserChaos.max)
+  })
+  it('环波粗细/波形宽度/环波亮度三新键：缺字段回默认 1（老档平滑升级）、出界钳限幅', () => {
+    expect(sanitizeMotionSettings({}).ledWaveThick).toBe(1)
+    expect(sanitizeMotionSettings({}).waveWidth).toBe(1)
+    expect(sanitizeMotionSettings({}).ledWaveBright).toBe(1)
+    expect(sanitizeMotionSettings({ ledWaveThick: 99 }).ledWaveThick).toBe(MOTION_LIMITS.ledWaveThick.max)
+    expect(sanitizeMotionSettings({ ledWaveThick: 0 }).ledWaveThick).toBe(MOTION_LIMITS.ledWaveThick.min)
+    expect(sanitizeMotionSettings({ waveWidth: 99 }).waveWidth).toBe(MOTION_LIMITS.waveWidth.max)
+    expect(sanitizeMotionSettings({ waveWidth: 0 }).waveWidth).toBe(MOTION_LIMITS.waveWidth.min)
+    expect(sanitizeMotionSettings({ ledWaveBright: 99 }).ledWaveBright).toBe(MOTION_LIMITS.ledWaveBright.max)
+    expect(sanitizeMotionSettings({ ledWaveBright: -1 }).ledWaveBright).toBe(MOTION_LIMITS.ledWaveBright.min)
   })
   it('高潮亮度：缺失回默认 1（老档案平滑升级=升级即见压档）、非默认界值保留、出界钳限、类型错回默认', () => {
     expect(sanitizeMotionSettings({}).climaxBrightness).toBe(1)

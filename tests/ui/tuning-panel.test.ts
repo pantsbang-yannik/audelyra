@@ -2,8 +2,9 @@ import { describe, it, expect, beforeEach, vi } from 'vitest'
 import { TuningPanel, type TuningPanelDeps } from '../../src/ui/tuning-panel'
 import { PanelCoordinator, type PanelLike, type UiStageLike } from '../../src/ui/panel-coordinator'
 import type { UiFocusProfile } from '../../src/scenes/types'
-import { defaultRhythmPreset } from '../../src/scenes/nebula/mapping/spec'
+import { defaultRhythmPreset, sanitizeMappingValues } from '../../src/scenes/nebula/mapping/spec'
 import type { MappingValues } from '../../src/scenes/nebula/mapping/types'
+import { DEFAULT_MACRO_KNOBS, macroToMapping, type MacroKnobs } from '../../src/scenes/nebula/mapping/macro'
 import type { ShapeSettings } from '../../src/scenes/nebula/shapes/types'
 import { DEFAULT_MOTION_SETTINGS } from '../../src/scenes/nebula/motion/types'
 import { DEFAULT_CAMERA_SETTINGS } from '../../src/scenes/nebula/camera-types'
@@ -86,7 +87,7 @@ function fakeElement(): FakeEl {
     contains: (node) => node === el || children.some((c) => c.contains(node)),
     getBoundingClientRect: () => ({ top: 0, left: 0, right: 0, bottom: 0, width: 0, height: 0 })
   }
-  // 真实 DOM 语义：赋值 innerHTML 会清空既有子节点——buildRows/buildShapeSection 重建（B1 T10 起
+  // 真实 DOM 语义：赋值 innerHTML 会清空既有子节点——buildRuleRows/buildShapeSection 重建（B1 T10 起
   // 形状区可被 onShapeChanged 反复重绘）靠这个来防止旧节点残留污染 findByText 一类的树遍历断言
   let innerHTMLValue = ''
   Object.defineProperty(el, 'innerHTML', {
@@ -133,8 +134,43 @@ function tooltipsInBody(): FakeEl[] {
   return docBody.children.filter((c) => 'data-tooltip' in c.attributes)
 }
 
+/** 在当前活树里按 data-role 找第一个匹配节点（宏旋钮行/按钮定位） */
+function findByRole(root: FakeEl, role: string): FakeEl | null {
+  if (root.attributes['data-role'] === role) return root
+  for (const c of root.children) {
+    const hit = findByRole(c, role)
+    if (hit) return hit
+  }
+  return null
+}
+/** 取某行子树里的 range input */
+function findRange(root: FakeEl): FakeEl | null {
+  if (root.type === 'range') return root
+  for (const c of root.children) {
+    const hit = findRange(c)
+    if (hit) return hit
+  }
+  return null
+}
+function rangeIn(row: FakeEl): FakeEl {
+  const hit = findRange(row)
+  if (!hit) throw new Error('该行无 range input')
+  return hit
+}
+
+/** 取某行子树里全部 range input，按 DOM 顺序（专业表规则行依次为 强度/平滑/输出下限/输出上限） */
+function rangesIn(row: FakeEl): FakeEl[] {
+  const out: FakeEl[] = []
+  const walk = (el: FakeEl): void => {
+    if (el.type === 'range') out.push(el)
+    for (const c of el.children) walk(c)
+  }
+  walk(row)
+  return out
+}
+
 /** 沿当前活树按文档序收集信息图标（innerHTML 含 <svg> 的节点）——比扫 created 数组更稳：
- * 镜头分组（Phase D）getCamera 播种可能与 getMapping 同轮触发 buildRows 二次重建，created
+ * 镜头分组（Phase D）getCamera 播种可能与 getMapping 同轮触发 buildRuleRows 二次重建，created
  * 数组会累积首轮已被清空重建的孤儿节点，且创建时序会与 shapeBody 的图标交错，扫创建序会错位；
  * 按文档序（body 先于 shapeBody 挂载）走当前树，才能稳定拿到「组标题图标排最前」这条语义 */
 function collectIcons(root: FakeEl): FakeEl[] {
@@ -148,12 +184,19 @@ function makeDeps(mapping: MappingValues, background: BackgroundSettings = struc
   getMapping: ReturnType<typeof vi.fn>
   previewMapping: ReturnType<typeof vi.fn>
   commitMapping: ReturnType<typeof vi.fn>
+  commitMacroKnobs: ReturnType<typeof vi.fn>
+  getAdvancedExpanded: ReturnType<typeof vi.fn>
+  commitAdvancedExpanded: ReturnType<typeof vi.fn>
 } {
   return {
     getMapping: vi.fn(async () => mapping),
     previewMapping: vi.fn((_m: MappingValues) => {}),
     commitMapping: vi.fn((_m: MappingValues) => {}),
-    getShape: vi.fn(async () => ({ current: 'nebula' as const, customCurrent: null, customShapes: [], coverPriority: true })),
+    getMacroKnobs: vi.fn(async () => ({ ...DEFAULT_MACRO_KNOBS })),
+    commitMacroKnobs: vi.fn((_k: MacroKnobs) => {}),
+    getAdvancedExpanded: vi.fn(async () => false),
+    commitAdvancedExpanded: vi.fn((_v: boolean) => {}),
+    getShape: vi.fn(async () => ({ current: 'nebula' as const, customCurrent: null, customShapes: [], coverPriority: true, showBody: true })),
     setShape: vi.fn(),
     onShapeChanged: vi.fn(),
     getMotion: vi.fn(async () => structuredClone(DEFAULT_MOTION_SETTINGS)),
@@ -190,7 +233,7 @@ describe('TuningPanel（右侧调音台——拖动预览/松手保存，本地�
     new TuningPanel(fakeElement() as unknown as HTMLElement, deps)
     await flush()
 
-    // buildRows 按 VISUAL_TARGETS 顺序（speed 打头，无 secondary）渲染，
+    // buildRuleRows 按 VISUAL_TARGETS 顺序（speed 打头，无 secondary）渲染，
     // 第一个 type==='range' 的元素即 speed·primary 的 gain 滑块
     const gainSlider = created.find((el) => el.type === 'range')!
     expect(gainSlider).toBeTruthy()
@@ -253,13 +296,13 @@ describe('TuningPanel（右侧调音台——拖动预览/松手保存，本地�
   // tests/ui/base-panel.test.ts 通用覆盖（TestPanel 场景与此处逐字同构）；这里只留
   // 上面「点外部关闭」一条冒烟，证明 TuningPanel 接的确实是 BasePanel 这套交互。
 
-  it('toggle()：deps 只含映射三项 + 形状三项 + 运动三项 + 镜头三项 + 歌名三项 + 歌词三项 + 背景三项（不含 uiStage/setModal——退台已交给协调器，面板本身不直接碰）', () => {
+  it('toggle()：deps 只含映射三项 + 宏旋钮两项 + 高级折叠两项 + 形状三项 + 运动三项 + 镜头三项 + 歌名三项 + 歌词三项 + 背景三项（不含 uiStage/setModal——退台已交给协调器，面板本身不直接碰）', () => {
     const mapping = defaultRhythmPreset()
     const deps = makeDeps(mapping)
     const panel = new TuningPanel(fakeElement() as unknown as HTMLElement, deps)
     expect(Object.keys(deps).sort()).toEqual([
-      'commitBackgroundFx', 'commitCamera', 'commitLyricsFx', 'commitMapping', 'commitMotion', 'commitTitleFx',
-      'getBackgroundFx', 'getCamera', 'getLyricsFx', 'getMapping', 'getMotion', 'getShape', 'getTitleFx',
+      'commitAdvancedExpanded', 'commitBackgroundFx', 'commitCamera', 'commitLyricsFx', 'commitMacroKnobs', 'commitMapping', 'commitMotion', 'commitTitleFx',
+      'getAdvancedExpanded', 'getBackgroundFx', 'getCamera', 'getLyricsFx', 'getMacroKnobs', 'getMapping', 'getMotion', 'getShape', 'getTitleFx',
       'onBackgroundChanged', 'onShapeChanged', 'previewBackgroundFx', 'previewCamera', 'previewLyricsFx', 'previewMapping', 'previewMotion',
       'previewTitleFx', 'setShape',
     ])
@@ -325,13 +368,16 @@ describe('TuningPanel（右侧调音台——拖动预览/松手保存，本地�
     new TuningPanel(parent as unknown as HTMLElement, deps)
     await flush()
 
-    // makeInfoIcon 内部把 feather info svg 字符串写进 innerHTML——用它反查图标节点数量（按文档序，见 collectIcons 注释）
-    const icons = collectIcons(parent)
+    // makeInfoIcon 内部把 feather info svg 字符串写进 innerHTML——用它反查图标节点数量（按文档序，见 collectIcons 注释）。
+    // 搜索根收窄到 rule-rows（专业表容器，data-role 见 tuning-panel.ts）而非整个面板——宏旋钮区的风格行
+    // 也带一个 ⓘ 图标（走独立的 macroDisposers 桶），若不收窄，「第一个图标」会被风格行顶到最前面，
+    // 与本测试要断言的对象（专业表组标题图标）错位（本测试只关心专业表区，非按文档序扫全面板）
+    const icons = collectIcons(findByRole(parent, 'rule-rows')!)
     // 5 个 VisualTarget 组标题各 1 个 + speed 只有 primary（4 个滑块）+ 其余组还有更多滑块——
     // 只断言下限：至少组标题图标（5）+ 单组 4 个滑块图标 > 5，证明滑块也接上了图标
     expect(icons.length).toBeGreaterThan(5)
 
-    // 更具体：第一个图标是 speed 组标题的信息图标（VISUAL_TARGETS[0]=speed，buildRows 先建组标题图标）——
+    // 更具体：第一个图标是 speed 组标题的信息图标（VISUAL_TARGETS[0]=speed，buildRuleRows 先建组标题图标）——
     // hover 它出的 tooltip 文字应是该目标的简述（TARGET_DESC），不再是 primary spec.label（item 6：组标题 ⓘ 不重复组名/规则名）
     const firstIcon = icons[0]
     firstIcon.dispatch('mouseenter')
@@ -357,7 +403,8 @@ describe('TuningPanel（右侧调音台——拖动预览/松手保存，本地�
     new TuningPanel(parent as unknown as HTMLElement, deps)
     await flush()
 
-    const icons = collectIcons(parent)
+    // 搜索根收窄到 rule-rows（理由同上一测试：本测试只关心专业表区的 tooltip 文案，不含宏旋钮区风格行）
+    const icons = collectIcons(findByRole(parent, 'rule-rows')!)
     const tipTextOf = (icon: FakeEl): string => {
       icon.dispatch('mouseenter')
       const tips = tooltipsInBody()
@@ -386,7 +433,8 @@ describe('TuningPanel（右侧调音台——拖动预览/松手保存，本地�
     new TuningPanel(parent as unknown as HTMLElement, deps)
     await flush()
 
-    const icons = collectIcons(parent)
+    // 搜索根收窄到 rule-rows（理由同上：本测试断言的是「启用」「来源」两行的图标，都在专业表区）
+    const icons = collectIcons(findByRole(parent, 'rule-rows')!)
     const tipTexts = icons.map((icon) => {
       icon.dispatch('mouseenter')
       const t = tooltipsInBody()
@@ -445,7 +493,7 @@ describe('TuningPanel（右侧调音台——拖动预览/松手保存，本地�
   })
 })
 
-describe('形状专属分区（Phase B1 T10）', () => {
+describe('主体分区（Phase B1 T10）', () => {
   function findByText(root: FakeEl, text: string): FakeEl | null {
     if (root.textContent === text) return root
     for (const c of root.children) {
@@ -456,7 +504,7 @@ describe('形状专属分区（Phase B1 T10）', () => {
   }
 
   /** 沿当前活树找第一个 type==='range' 的节点——比 created.find 更稳：镜头分组（Phase D）
-   * getCamera 播种可能触发 buildRows 二次重建，created 数组会累积首轮已被清空重建的孤儿节点 */
+   * getCamera 播种可能触发 buildRuleRows 二次重建，created 数组会累积首轮已被清空重建的孤儿节点 */
   function findFirstRange(root: FakeEl): FakeEl | null {
     if (root.type === 'range') return root
     for (const c of root.children) {
@@ -473,7 +521,11 @@ describe('形状专属分区（Phase B1 T10）', () => {
       getMapping: async () => defaultRhythmPreset(),
       previewMapping: vi.fn(),
       commitMapping: vi.fn(),
-      getShape: async () => ({ current: 'nebula', customCurrent: null, customShapes: [], coverPriority: true }),
+      getMacroKnobs: vi.fn(async () => ({ ...DEFAULT_MACRO_KNOBS })),
+      commitMacroKnobs: vi.fn(),
+      getAdvancedExpanded: vi.fn(async () => false),
+      commitAdvancedExpanded: vi.fn(),
+      getShape: async () => ({ current: 'nebula', customCurrent: null, customShapes: [], coverPriority: true, showBody: true }),
       setShape: vi.fn(),
       onShapeChanged: (cb) => { shapeCb = cb },
       getMotion: async () => structuredClone(DEFAULT_MOTION_SETTINGS),
@@ -506,29 +558,29 @@ describe('形状专属分区（Phase B1 T10）', () => {
 
   it('fb3 自适应分组：粒子形状无线条组；切到频谱环线条组出现、运动组改题；切回粒子组还原', async () => {
     const { parent, fireShapeChanged } = await makeShapePanel()
-    expect(findByText(parent, '线条（频谱环/波形线）')).toBeNull()
+    expect(findByText(parent, '线条（频谱环）')).toBeNull()
     expect(findByText(parent, '运动（封面/星云）')).not.toBeNull()
     fireShapeChanged({ current: 'spectrum', customCurrent: null, customShapes: [], coverPriority: true })
-    expect(findByText(parent, '线条（频谱环/波形线）')).not.toBeNull()
+    expect(findByText(parent, '线条（频谱环）')).not.toBeNull()
     expect(findByText(parent, '运动（封面接管时生效）')).not.toBeNull()
-    fireShapeChanged({ current: 'sphere', customCurrent: null, customShapes: [], coverPriority: true })
-    expect(findByText(parent, '线条（频谱环/波形线）')).toBeNull()
+    fireShapeChanged({ current: 'heart', customCurrent: null, customShapes: [], coverPriority: true })
+    expect(findByText(parent, '线条（频谱环）')).toBeNull()
     expect(findByText(parent, '运动（封面/星云）')).not.toBeNull()
   })
 
-  it('渲染 tab 栏：音画映射 / 形状专属 两个 tab 节点（不再是眉题）', async () => {
+  it('渲染 tab 栏：律动 / 主体 两个 tab 节点（不再是眉题）', async () => {
     const { parent } = await makeShapePanel()
-    expect(findByText(parent, '音画映射')).not.toBeNull()
-    expect(findByText(parent, '形状专属')).not.toBeNull()
+    expect(findByText(parent, '律动')).not.toBeNull()
+    expect(findByText(parent, '主体')).not.toBeNull()
   })
 
-  it('默认激活「音画映射」tab：通用内容可见，形状分区隐藏', async () => {
+  it('默认激活「律动」tab：通用内容可见，形状分区隐藏', async () => {
     const { parent } = await makeShapePanel()
     // 通用区第一个滑块（type==='range'）必须在可见容器内——找不到隐藏的祖先容器
     const anyRangeVisible = created.some((el) => el.type === 'range')
     expect(anyRangeVisible).toBe(true)
     const currentShapeLabel = findByText(parent, '当前形状')
-    // 形状专属分区的容器（只读行的祖先）应被标记 display:none
+    // 主体分区的容器（只读行的祖先）应被标记 display:none
     let node: FakeEl | null = currentShapeLabel
     let hiddenAncestorFound = false
     while (node) {
@@ -538,9 +590,9 @@ describe('形状专属分区（Phase B1 T10）', () => {
     expect(hiddenAncestorFound).toBe(true)
   })
 
-  it('点击「形状专属」tab → 形状分区显示、通用分区隐藏；再点「音画映射」反转', async () => {
+  it('点击「主体」tab → 形状分区显示、通用分区隐藏；再点「律动」反转', async () => {
     const { parent } = await makeShapePanel()
-    const shapeTab = findByText(parent, '形状专属')!
+    const shapeTab = findByText(parent, '主体')!
     shapeTab.dispatch('click')
 
     const shapeDropdownLabel = findByText(parent, '形状')!
@@ -555,7 +607,7 @@ describe('形状专属分区（Phase B1 T10）', () => {
     while (node) { if (displayOf(node) === 'none') { generalHidden = true; break }; node = node._parent }
     expect(generalHidden).toBe(true)
 
-    const generalTab = findByText(parent, '音画映射')!
+    const generalTab = findByText(parent, '律动')!
     generalTab.dispatch('click')
     node = generalSlider
     generalHidden = false
@@ -581,24 +633,24 @@ describe('形状专属分区（Phase B1 T10）', () => {
     const row = label._parent!._parent! // label span → labelGroup → row
     const toggleHost = row.children[row.children.length - 1]
     toggleHost.children[0].dispatch('click')
-    expect(deps.setShape).toHaveBeenCalledWith({ current: 'nebula', customCurrent: null, customShapes: [], coverPriority: false })
+    expect(deps.setShape).toHaveBeenCalledWith({ current: 'nebula', customCurrent: null, customShapes: [], coverPriority: false, showBody: true })
   })
-  it('只读当前形状行：回流送 sphere → 文本更新为「星球」（双入口显示同步）', async () => {
+  it('只读当前形状行：回流送 heart → 文本更新为「心脏」（双入口显示同步）', async () => {
     const { parent, fireShapeChanged } = await makeShapePanel()
-    fireShapeChanged({ current: 'sphere', coverPriority: false })
-    expect(findByText(parent, '星球')).not.toBeNull()
+    fireShapeChanged({ current: 'heart', coverPriority: false })
+    expect(findByText(parent, '心脏')).not.toBeNull()
     expect(findByText(parent, '星云')).toBeNull() // 旧值不残留
   })
   it('形状 tab 不再渲染可点击的形状选项（下拉已退役，入口=操作坞选择器）', async () => {
     const { parent } = await makeShapePanel()
-    expect(findByText(parent, '星球')).toBeNull() // 形状选项行不存在（只读行只显示当前值「星云」）
+    expect(findByText(parent, '心脏')).toBeNull() // 形状选项行不存在（只读行只显示当前值「星云」）
   })
   it('行为不变量：通用 tab 激活时经历 onShapeChanged 回流重绘，形状分区仍保持隐藏', async () => {
     const { parent, fireShapeChanged } = await makeShapePanel()
     // 默认就在通用 tab，不需要额外点击。当前实现里重建只清 shapeBody 子节点、不触碰其 display
     // （显隐由 showTab 独立掌管），本用例锁定的是可观察行为——若未来重建方式改成整体替换元素等，
     // 它会拦住「回流把隐藏的形状区意外打开」的回归
-    fireShapeChanged({ current: 'sphere', coverPriority: false })
+    fireShapeChanged({ current: 'heart', coverPriority: false })
     const currentShapeLabel = findByText(parent, '当前形状')!
     let node: FakeEl | null = currentShapeLabel
     let shapeHidden = false
@@ -607,7 +659,7 @@ describe('形状专属分区（Phase B1 T10）', () => {
   })
 })
 
-describe('运动旋钮（Phase C2 T6：形状专属 tab 的第一批真参数）', () => {
+describe('运动旋钮（Phase C2 T6：主体 tab 的第一批真参数）', () => {
   function findByText(root: FakeEl, text: string): FakeEl | null {
     if (root.textContent === text) return root
     for (const c of root.children) {
@@ -624,7 +676,11 @@ describe('运动旋钮（Phase C2 T6：形状专属 tab 的第一批真参数）
       getMapping: async () => defaultRhythmPreset(),
       previewMapping: vi.fn(),
       commitMapping: vi.fn(),
-      getShape: async () => ({ current: 'nebula', customCurrent: null, customShapes: [], coverPriority: true }),
+      getMacroKnobs: vi.fn(async () => ({ ...DEFAULT_MACRO_KNOBS })),
+      commitMacroKnobs: vi.fn(),
+      getAdvancedExpanded: vi.fn(async () => false),
+      commitAdvancedExpanded: vi.fn(),
+      getShape: async () => ({ current: 'nebula', customCurrent: null, customShapes: [], coverPriority: true, showBody: true }),
       setShape: vi.fn(),
       onShapeChanged: (cb) => { shapeCb = cb },
       getMotion: async () => structuredClone(DEFAULT_MOTION_SETTINGS),
@@ -718,7 +774,7 @@ describe('运动旋钮（Phase C2 T6：形状专属 tab 的第一批真参数）
     input.value = '1.5'
     input.dispatch('input') // 仅 preview，未 commit
 
-    fireShapeChanged({ current: 'sphere', coverPriority: false }) // 触发 buildShapeSection 整体重建
+    fireShapeChanged({ current: 'heart', coverPriority: false }) // 触发 buildShapeSection 整体重建
 
     const rebuiltInput = findRangeInputFor(parent, '轰炸强度')
     expect(rebuiltInput.value).toBe('1.5')
@@ -807,22 +863,22 @@ describe('歌词歌名 tab（批2：两组自设置面板迁入）', () => {
     return out
   }
 
-  it('tab 栏渲染三个 tab：音画映射 / 形状专属 / 歌词歌名', async () => {
+  it('tab 栏渲染三个 tab：律动 / 主体 / 歌词歌名', async () => {
     const deps = makeDeps(defaultRhythmPreset())
     const panel = new TuningPanel(docBody as unknown as HTMLElement, deps)
     await flush()
-    expect(findByText(docBody, '音画映射')).toBeTruthy()
-    expect(findByText(docBody, '形状专属')).toBeTruthy()
+    expect(findByText(docBody, '律动')).toBeTruthy()
+    expect(findByText(docBody, '主体')).toBeTruthy()
     expect(findByText(docBody, '歌词歌名')).toBeTruthy()
     panel.dispose()
   })
 
-  it('三向显隐互斥：点「歌词歌名」→ 歌词区显示、通用/形状区隐藏；点回「音画映射」反转', async () => {
+  it('三向显隐互斥：点「歌词歌名」→ 歌词区显示、通用/形状区隐藏；点回「律动」反转', async () => {
     const deps = makeDeps(defaultRhythmPreset())
     const panel = new TuningPanel(docBody as unknown as HTMLElement, deps)
     await flush()
     const lyricsTab = findByText(docBody, '歌词歌名')!
-    const generalTab = findByText(docBody, '音画映射')!
+    const generalTab = findByText(docBody, '律动')!
     // body/shapeBody/lyricsBody 是 appendRow 进容器的三个分区容器——按 display 断言
     lyricsTab.dispatch('click')
     expect(panel.lyricsBodyForTest.style.display).toBe('')
@@ -1076,7 +1132,7 @@ describe('背景 tab（虚空之镜：极光/涟漪/尘埃三滑杆）', () => {
   })
 })
 
-describe('五 Tab 重组（fb3：通用调试拆为音画映射+镜头）', () => {
+describe('五 Tab 重组（fb3：通用调试拆为律动+镜头）', () => {
   /** 沿树找 textContent 恰为 text 的节点（同「背景 tab」用例写法） */
   function findByText(root: FakeEl, text: string): FakeEl | null {
     if (root.textContent === text) return root
@@ -1095,11 +1151,11 @@ describe('五 Tab 重组（fb3：通用调试拆为音画映射+镜头）', () =
     return out
   }
 
-  it('tab 栏渲染五个 tab：音画映射/镜头/形状专属/歌词歌名/背景', async () => {
+  it('tab 栏渲染五个 tab：律动/镜头/主体/歌词歌名/背景', async () => {
     const deps = makeDeps(defaultRhythmPreset())
     const panel = new TuningPanel(docBody as unknown as HTMLElement, deps)
     await flush()
-    for (const t of ['音画映射', '镜头', '形状专属', '歌词歌名', '背景']) {
+    for (const t of ['律动', '镜头', '主体', '歌词歌名', '背景']) {
       expect(findByText(docBody, t)).toBeTruthy()
     }
     panel.dispose()
@@ -1335,7 +1391,7 @@ describe('调音台·自定义背景控件组（视频背景 v2：与虚空之�
     panel.dispose()
   })
 
-  it('控件齐全：透明度/饱和度两滑块 + 呼吸/显示主体两开关落在 backgroundBody', async () => {
+  it('控件齐全：透明度/饱和度两滑块 + 呼吸开关落在 backgroundBody（显示主体已迁至主体 tab，通用化）', async () => {
     const deps = makeDeps(defaultRhythmPreset())
     const panel = new TuningPanel(docBody as unknown as HTMLElement, deps)
     await flush()
@@ -1343,8 +1399,54 @@ describe('调音台·自定义背景控件组（视频背景 v2：与虚空之�
 
     const body = panel.backgroundBodyForTest as unknown as FakeEl
     const customRows = collectByRole(body, 'bg-custom-row')
-    expect(customRows).toHaveLength(4)
+    expect(customRows).toHaveLength(3)
     panel.dispose()
+  })
+})
+
+describe('TuningPanel：主体显隐开关', () => {
+  /** 沿当前活树按文本精确匹配查找第一个节点（同「运动旋钮」describe 块内写法） */
+  function findByText(root: FakeEl, text: string): FakeEl | null {
+    if (root.textContent === text) return root
+    for (const c of root.children) {
+      const hit = findByText(c, text)
+      if (hit) return hit
+    }
+    return null
+  }
+
+  /** makeToggleRow 结构：row=[labelGroup, toggleHost]，toggleHost.children[0] 是 ToggleSwitch 的 track 根节点
+   * （同「运动旋钮」describe 块内 findToggleTrackFor 写法） */
+  function findToggleTrackFor(parent: FakeEl, labelText: string): FakeEl {
+    const label = findByText(parent, labelText)!
+    const row = label._parent!._parent!
+    const toggleHost = row.children[row.children.length - 1]
+    return toggleHost.children[0]
+  }
+
+  it('主体 tab 渲染「显示主体」开关，位置在页首说明之后、当前形状之前', async () => {
+    const deps = makeDeps(defaultRhythmPreset())
+    const panel = new TuningPanel(fakeElement() as unknown as HTMLElement, deps)
+    await flush()
+    const shapeBody = panel.shapeBodyForTest as unknown as FakeEl
+    const row = findByRole(shapeBody, 'shape-show-body')
+    expect(row).toBeTruthy()
+    // 顺序：直接子节点里，说明行 < 本开关 < 当前形状行
+    const idx = (role: string): number => shapeBody.children.findIndex((c) => findByRole(c, role) !== null)
+    expect(idx('shape-show-body')).toBeLessThan(idx('shape-current-row'))
+  })
+
+  it('拨开关 → 走 setShape 落盘', async () => {
+    const deps = makeDeps(defaultRhythmPreset())
+    const panel = new TuningPanel(fakeElement() as unknown as HTMLElement, deps)
+    await flush()
+    const parent = panel.shapeBodyForTest as unknown as FakeEl
+    // 定位沿用该文件既有的「封面优先开关」写法：findByText 拿 label → findToggleTrackFor 拿 track
+    findToggleTrackFor(parent, '显示主体').dispatch('click')
+    expect(deps.setShape).toHaveBeenCalled()
+    // deps.setShape 静态类型是 TuningPanelDeps 声明的裸函数签名（非 Mock），故借道 ReturnType<typeof vi.fn>
+    // 取 .mock（同文件 onShapeChanged 的既有取用手法，见「切回星云」用例）
+    expect((deps.setShape as ReturnType<typeof vi.fn>).mock.calls.at(-1)![0].showBody).toBe(false) // 默认 true → 拨后 false
   })
 })
 
@@ -1368,5 +1470,358 @@ describe('openToTab（v2 亲验反馈②：卡片编辑钮打开调音台直落�
     expect(panel.isOpen).toBe(true)
     expect((panel.backgroundBodyForTest as unknown as FakeEl).style.display).toBe('')
     panel.dispose()
+  })
+})
+
+describe('律动 tab 能力自适应（mixer v2）', () => {
+  const treeTexts = (root: FakeEl): string[] => [root.textContent, ...root.children.flatMap((c) => treeTexts(c))]
+
+  it('激光在台：律动页无「空间」组，其余四组在；页首有全局说明与宏旋钮占位锚', async () => {
+    const deps = makeDeps(defaultRhythmPreset())
+    deps.getShape = vi.fn(async () => ({ current: 'laser' as const, customCurrent: null, customShapes: [], coverPriority: false, showBody: true }))
+    const parent = fakeElement()
+    const panel = new TuningPanel(parent as unknown as HTMLElement, deps)
+    await flush()
+    const body = panel.generalBodyForTest as unknown as FakeEl
+    const texts = treeTexts(body)
+    expect(texts).not.toContain('空间')
+    for (const label of ['速度', '密度', '亮度', '厚度']) expect(texts).toContain(label)
+    const roles = (root: FakeEl): string[] => [root.attributes['data-role'] ?? '', ...root.children.flatMap((c) => roles(c))]
+    expect(roles(body)).toContain('rhythm-global-hint')
+    expect(roles(body)).toContain('macro-knobs-slot')
+  })
+
+  it('切回星云（onShapeChanged 回流）：五组齐全，被隐目标的规则值未丢', async () => {
+    const mapping = defaultRhythmPreset()
+    mapping.targets.space.primary.gain = 1.7 // 哨兵值：隐藏期间不许被改（GAIN_MAX=2 内合法）
+    const deps = makeDeps(mapping)
+    deps.getShape = vi.fn(async () => ({ current: 'laser' as const, customCurrent: null, customShapes: [], coverPriority: false, showBody: true }))
+    const parent = fakeElement()
+    const panel = new TuningPanel(parent as unknown as HTMLElement, deps)
+    await flush() // 播种完成：激光在台，空间组未渲染
+    const cb = (deps.onShapeChanged as ReturnType<typeof vi.fn>).mock.calls[0][0] as (s: ShapeSettings) => void
+    cb({ current: 'nebula', customCurrent: null, customShapes: [], coverPriority: true, showBody: true })
+    const body = panel.generalBodyForTest as unknown as FakeEl
+    expect(treeTexts(body)).toContain('空间')
+    // 值不丢：空间组重新渲染后，强度滑块初值=哨兵值（滑块 value 由 draft 播种，见 makeRange）
+    expect(created.some((el) => el.type === 'range' && el.value === '1.7')).toBe(true)
+  })
+
+  it('tab 栏五标签：律动 / 主体 / 镜头 / 歌词歌名 / 背景', async () => {
+    const deps = makeDeps(defaultRhythmPreset())
+    const parent = fakeElement()
+    new TuningPanel(parent as unknown as HTMLElement, deps)
+    await flush()
+    const all = created.map((el) => el.textContent)
+    for (const label of ['律动', '主体', '镜头', '歌词歌名', '背景']) expect(all).toContain(label)
+    expect(all).not.toContain('音画映射')
+    expect(all).not.toContain('形状专属')
+    // 顺序须与定稿一致（律动/主体/镜头/歌词歌名/背景）——只查存在会漏掉镜头/主体对调。
+    // 用首次出现位置断言（「镜头」还会作为镜头页组标题再现，indexOf 取 tab 那次）
+    const order = ['律动', '主体', '镜头', '歌词歌名', '背景'].map((l) => all.indexOf(l))
+    expect(order).toEqual([...order].sort((a, b) => a - b))
+  })
+
+  it('激光形状律动页无「空间」组：即便封面优先开着也不显示（封面优先≠封面正在接管，无封面时台上仍是激光，不显示无效组）', async () => {
+    // 真正的粒子接管判据是 coverPriority && coverCloud（resolve.ts），面板层拿不到 coverCloud 运行时状态，
+    // 故只按当前形状能力显隐——宁可封面接管瞬间暂缺有效组，也不显示对激光无效的死件（spec 零死件优先）
+    const deps = makeDeps(defaultRhythmPreset())
+    deps.getShape = vi.fn(async () => ({ current: 'laser' as const, customCurrent: null, customShapes: [], coverPriority: true, showBody: true }))
+    const parent = fakeElement()
+    const panel = new TuningPanel(parent as unknown as HTMLElement, deps)
+    await flush()
+    const body = panel.generalBodyForTest as unknown as FakeEl
+    expect(treeTexts(body)).not.toContain('空间')
+  })
+})
+
+describe('TuningPanel：标准层宏旋钮', () => {
+  it('律动 tab 顶部渲染劲儿/跟手两滑块，含中点 0.5 刻度', async () => {
+    const deps = makeDeps(defaultRhythmPreset())
+    const panel = new TuningPanel(fakeElement() as unknown as HTMLElement, deps)
+    await flush()
+    const body = panel.generalBodyForTest as unknown as FakeEl
+    for (const role of ['macro-knob-strength', 'macro-knob-response']) {
+      const row = findByRole(body, role)
+      expect(row, role).toBeTruthy()
+      expect(rangeIn(row!).value).toBe('0.5') // 默认播种在中点
+    }
+    // 中点刻度：tick-strip 存在（makeRange 的 ticks 渲染）
+    expect(findByRole(findByRole(body, 'macro-knob-strength')!, 'tick-strip')).toBeTruthy()
+  })
+
+  it('拖动劲儿（input）只 preview，产出=macroToMapping；松手（change）落 mapping + macroKnobs 并重刷专业表', async () => {
+    const deps = makeDeps(defaultRhythmPreset())
+    const panel = new TuningPanel(fakeElement() as unknown as HTMLElement, deps)
+    await flush()
+    const body = panel.generalBodyForTest as unknown as FakeEl
+    const slider = rangeIn(findByRole(body, 'macro-knob-strength')!)
+
+    slider.value = '1'
+    slider.dispatch('input')
+    expect(deps.previewMapping).toHaveBeenCalledTimes(1)
+    expect(deps.commitMapping).not.toHaveBeenCalled()
+    const previewed = deps.previewMapping.mock.calls[0][0] as MappingValues
+    expect(previewed).toEqual(macroToMapping({ style: 'balanced', strength: 1, response: 0.5 }))
+
+    slider.dispatch('change')
+    expect(deps.commitMapping).toHaveBeenCalledTimes(1)
+    expect(deps.commitMacroKnobs).toHaveBeenCalledTimes(1)
+    expect(deps.commitMacroKnobs.mock.calls[0][0]).toEqual({ style: 'balanced', strength: 1, response: 0.5 })
+    const projected = macroToMapping({ style: 'balanced', strength: 1, response: 0.5 })
+    const committed = deps.commitMapping.mock.calls.at(-1)![0] as MappingValues
+    // 均衡档下 brightness.primary 是 lead（speed.primary 是 neutral，strength=1 时 gain 恒等于播种值 1，
+    // 探针没有区分度，测不出重刷回归），strength=1 → gain 1×1.5=1.5，与播种值 1 有区分度
+    expect(committed.targets.brightness.primary.gain).toBeCloseTo(projected.targets.brightness.primary.gain, 5)
+    // 重刷专业表：松手后底下 brightness·primary 的「强度」滑块（行内第一个 range）跳到投影后的值——
+    // 只断言 commit 入参会漏掉这条链路（去掉重刷仍全绿），故直接读 DOM
+    expect(rangeIn(findByRole(body, 'rule-brightness-primary')!).value)
+      .toBe(String(projected.targets.brightness.primary.gain))
+  })
+
+  it('重置按钮：两旋钮回中点 = 默认预设', async () => {
+    const deps = makeDeps(defaultRhythmPreset())
+    const panel = new TuningPanel(fakeElement() as unknown as HTMLElement, deps)
+    await flush()
+    const body = panel.generalBodyForTest as unknown as FakeEl
+    // 先把劲儿拖离中点
+    const slider = rangeIn(findByRole(body, 'macro-knob-strength')!)
+    slider.value = '1'; slider.dispatch('change')
+    // 点重置
+    findByRole(panel.generalBodyForTest as unknown as FakeEl, 'macro-reset')!.dispatch('click')
+    expect(deps.commitMacroKnobs.mock.calls.at(-1)![0]).toEqual(DEFAULT_MACRO_KNOBS)
+    const committed = deps.commitMapping.mock.calls.at(-1)![0] as MappingValues
+    expect(committed).toEqual(defaultRhythmPreset())
+  })
+
+  it('落盘旋钮位置传副本：连拖两个旋钮，第一条调用记录不被追溯篡改', async () => {
+    const deps = makeDeps(defaultRhythmPreset())
+    const panel = new TuningPanel(fakeElement() as unknown as HTMLElement, deps)
+    await flush()
+    const body = panel.generalBodyForTest as unknown as FakeEl
+
+    const strength = rangeIn(findByRole(body, 'macro-knob-strength')!)
+    strength.value = '1'; strength.dispatch('change')
+    const response = rangeIn(findByRole(body, 'macro-knob-response')!)
+    response.value = '0'; response.dispatch('change')
+
+    expect(deps.commitMacroKnobs.mock.calls[0][0]).toEqual({ style: 'balanced', strength: 1, response: 0.5 })
+    expect(deps.commitMacroKnobs.mock.calls[1][0]).toEqual({ style: 'balanced', strength: 1, response: 0 })
+  })
+
+  it('重置：两滑块 thumb 一起回中点（宏旋钮子树不重建，须显式回写）', async () => {
+    const deps = makeDeps(defaultRhythmPreset())
+    const panel = new TuningPanel(fakeElement() as unknown as HTMLElement, deps)
+    await flush()
+    const body = panel.generalBodyForTest as unknown as FakeEl
+    const strength = rangeIn(findByRole(body, 'macro-knob-strength')!)
+    strength.value = '1'; strength.dispatch('change')
+
+    findByRole(body, 'macro-reset')!.dispatch('click')
+    for (const role of ['macro-knob-strength', 'macro-knob-response']) {
+      expect(rangeIn(findByRole(body, role)!).value, role).toBe('0.5')
+    }
+  })
+
+  it('松手只重刷专业表，不重建宏旋钮子树——滑块仍是同一个节点（键盘方向键连发 input+change 时不丢焦点）', async () => {
+    const deps = makeDeps(defaultRhythmPreset())
+    const panel = new TuningPanel(fakeElement() as unknown as HTMLElement, deps)
+    await flush()
+    const body = panel.generalBodyForTest as unknown as FakeEl
+    const before = rangeIn(findByRole(body, 'macro-knob-strength')!)
+    const resetBefore = findByRole(body, 'macro-reset')!
+
+    before.value = '0.7'; before.dispatch('change')
+    expect(rangeIn(findByRole(body, 'macro-knob-strength')!)).toBe(before)
+
+    // 重置按钮同理：不再在自己的 click 回调里被销毁
+    resetBefore.dispatch('click')
+    expect(findByRole(body, 'macro-reset')).toBe(resetBefore)
+    expect(rangeIn(findByRole(body, 'macro-knob-strength')!)).toBe(before)
+  })
+})
+
+describe('TuningPanel：宏旋钮陈旧提示', () => {
+  it('初始不显示；专业表手调后显示；再动宏旋钮后消失', async () => {
+    const deps = makeDeps(defaultRhythmPreset())
+    const panel = new TuningPanel(fakeElement() as unknown as HTMLElement, deps)
+    await flush()
+    const body = () => panel.generalBodyForTest as unknown as FakeEl
+
+    // 初始：无提示（或 display:none）
+    const initial = findByRole(body(), 'macro-stale-note')
+    expect(initial === null || initial.style.display === 'none').toBe(true)
+
+    // 专业表手调一个规则滑块（speed·primary gain，宏旋钮之下第一个非宏 range）——
+    // 找 macroSlot 之外的第一个 range：用 buildRuleEditor 的「强度」行
+    const proRow = findByRole(body(), 'rule-speed-primary')! // 规则编辑器行锚点
+    const proSlider = rangeIn(proRow)
+    proSlider.value = '1.5'; proSlider.dispatch('change')
+
+    const stale = findByRole(body(), 'macro-stale-note')
+    expect(stale).toBeTruthy()
+    expect(stale!.style.display).not.toBe('none')
+
+    // 再动宏旋钮：提示消失
+    const knob = rangeIn(findByRole(body(), 'macro-knob-strength')!)
+    knob.value = '0.7'; knob.dispatch('change')
+    const after = findByRole(body(), 'macro-stale-note')
+    expect(after === null || after.style.display === 'none').toBe(true)
+  })
+
+  it('老存档：mapping 是手调值 + 旋钮停在中点 → 面板一打开就点亮（陈旧位从数据推导，跨重启有效）', async () => {
+    const tweaked = defaultRhythmPreset()
+    tweaked.targets.speed.primary.gain = 1.7 // 手调痕迹：与中点旋钮的投影（=默认预设）对不上
+    const deps = makeDeps(tweaked) // 旋钮位置=默认均衡档 + 两个 0.5（老存档没有该字段时也是这个回退值）
+    const panel = new TuningPanel(fakeElement() as unknown as HTMLElement, deps)
+    await flush()
+
+    const note = findByRole(panel.generalBodyForTest as unknown as FakeEl, 'macro-stale-note')
+    expect(note).toBeTruthy()
+    expect(note!.style.display).not.toBe('none')
+  })
+
+  it('存档 mapping 恰是旋钮位置的投影（非中点也算）→ 不点亮', async () => {
+    const knobs: MacroKnobs = { style: 'balanced', strength: 0.8, response: 0.3 }
+    // 种子走存储层同款归一化（sanitizeMappingValues）而非 macroToMapping 直出对象——
+    // 否则种子键序恰好与投影侧同源（都是 rule() 序），双侧删 sanitize 的回归会被这套键序巧合悄悄放过
+    const deps = makeDeps(sanitizeMappingValues(macroToMapping(knobs)))
+    deps.getMacroKnobs = vi.fn(async () => ({ ...knobs }))
+    const panel = new TuningPanel(fakeElement() as unknown as HTMLElement, deps)
+    await flush()
+
+    const note = findByRole(panel.generalBodyForTest as unknown as FakeEl, 'macro-stale-note')
+    expect(note === null || note.style.display === 'none').toBe(true)
+  })
+})
+
+describe('TuningPanel：风格按钮', () => {
+  it('渲染四档风格，默认选中均衡（选中态用颜色透明度表达）', async () => {
+    const deps = makeDeps(defaultRhythmPreset())
+    const panel = new TuningPanel(fakeElement() as unknown as HTMLElement, deps)
+    await flush()
+    const body = panel.generalBodyForTest as unknown as FakeEl
+    expect(findByRole(body, 'macro-style-row')).toBeTruthy()
+    for (const id of ['balanced', 'rhythmic', 'ambient', 'bass']) {
+      expect(findByRole(body, `macro-style-${id}`), id).toBeTruthy()
+    }
+    expect(findByRole(body, 'macro-style-balanced')!.textContent).toBe('均衡')
+    // 选中态：均衡用选中透明度 0.85，其余用未选 0.35
+    expect(findByRole(body, 'macro-style-balanced')!.style.color).toContain('0.85')
+    for (const id of ['rhythmic', 'ambient', 'bass']) {
+      expect(findByRole(body, `macro-style-${id}`)!.style.color, id).toContain('0.35')
+    }
+  })
+
+  it('点风格 → 落整套投影 + 落 macroKnobs + 重刷专业表 + 选中态迁移', async () => {
+    const deps = makeDeps(defaultRhythmPreset())
+    const panel = new TuningPanel(fakeElement() as unknown as HTMLElement, deps)
+    await flush()
+    const body = panel.generalBodyForTest as unknown as FakeEl
+
+    findByRole(body, 'macro-style-rhythmic')!.dispatch('click')
+
+    expect(deps.commitMacroKnobs).toHaveBeenCalledTimes(1)
+    expect(deps.commitMacroKnobs.mock.calls[0][0])
+      .toEqual({ style: 'rhythmic', strength: 0.5, response: 0.5 })
+    const committed = deps.commitMapping.mock.calls.at(-1)![0] as MappingValues
+    expect(committed).toEqual(macroToMapping({ style: 'rhythmic', strength: 0.5, response: 0.5 }))
+    expect(committed.targets.speed.primary.source).toBe('energy')
+
+    // 重刷专业表（DOM 断言，不是 mock 入参）：speed 行的「平滑」滑块从默认 1000ms 变成节奏档的 200ms。
+    // 删掉 applyMacro 里的 buildRuleRows 这条会红。
+    const proRow = findByRole(panel.generalBodyForTest as unknown as FakeEl, 'rule-speed-primary')!
+    expect(rangesIn(proRow)[1].value).toBe('200')
+
+    // 选中态跟着迁移（风格行不重建，靠 makeChoiceRow 内部 paint）
+    const after = panel.generalBodyForTest as unknown as FakeEl
+    expect(findByRole(after, 'macro-style-rhythmic')!.style.color).toContain('0.85')
+    expect(findByRole(after, 'macro-style-balanced')!.style.color).toContain('0.35')
+  })
+
+  it('重置 → 风格回均衡且选中态跟着回退', async () => {
+    const deps = makeDeps(defaultRhythmPreset())
+    const panel = new TuningPanel(fakeElement() as unknown as HTMLElement, deps)
+    await flush()
+    const body = panel.generalBodyForTest as unknown as FakeEl
+
+    findByRole(body, 'macro-style-bass')!.dispatch('click')
+    findByRole(panel.generalBodyForTest as unknown as FakeEl, 'macro-reset')!.dispatch('click')
+
+    expect(deps.commitMacroKnobs.mock.calls.at(-1)![0]).toEqual(DEFAULT_MACRO_KNOBS)
+    const committed = deps.commitMapping.mock.calls.at(-1)![0] as MappingValues
+    expect(committed).toEqual(defaultRhythmPreset())
+    // 选中态回退：重置绕过点击直接改 macroDraft，靠 macroKnobSyncs 里的 repaint 钩子刷新
+    const after = panel.generalBodyForTest as unknown as FakeEl
+    expect(findByRole(after, 'macro-style-balanced')!.style.color).toContain('0.85')
+    expect(findByRole(after, 'macro-style-bass')!.style.color).toContain('0.35')
+  })
+
+  it('风格行 ⓘ 图标不被 buildRuleRows 的 drain 误杀（hover 仍出 tooltip）', async () => {
+    const deps = makeDeps(defaultRhythmPreset())
+    const panel = new TuningPanel(fakeElement() as unknown as HTMLElement, deps)
+    await flush()
+    const row = findByRole(panel.generalBodyForTest as unknown as FakeEl, 'macro-style-row')!
+    const icons = collectIcons(row)
+    expect(icons.length).toBe(1)
+    icons[0].dispatch('mouseenter')
+    const tips = tooltipsInBody()
+    expect(tips.length).toBe(1)
+    expect(tips[0].textContent).toContain('节奏咬鼓点')
+  })
+})
+
+describe('TuningPanel：高级调整折叠', () => {
+  it('默认收起：折叠头存在，专业表 display 为 none', async () => {
+    const deps = makeDeps(defaultRhythmPreset())
+    const panel = new TuningPanel(fakeElement() as unknown as HTMLElement, deps)
+    await flush()
+    const body = panel.generalBodyForTest as unknown as FakeEl
+    const toggle = findByRole(body, 'advanced-toggle')
+    expect(toggle).toBeTruthy()
+    expect(toggle!.textContent).toContain('高级调整')
+    expect(findByRole(body, 'rule-rows')!.style.display).toBe('none')
+  })
+
+  it('点折叠头 → 展开并落盘；再点 → 收起并落盘', async () => {
+    const deps = makeDeps(defaultRhythmPreset())
+    const panel = new TuningPanel(fakeElement() as unknown as HTMLElement, deps)
+    await flush()
+    const body = panel.generalBodyForTest as unknown as FakeEl
+    const toggle = findByRole(body, 'advanced-toggle')!
+
+    toggle.dispatch('click')
+    expect(findByRole(body, 'rule-rows')!.style.display).toBe('')
+    expect(deps.commitAdvancedExpanded).toHaveBeenCalledWith(true)
+
+    toggle.dispatch('click')
+    expect(findByRole(body, 'rule-rows')!.style.display).toBe('none')
+    expect(deps.commitAdvancedExpanded).toHaveBeenLastCalledWith(false)
+  })
+
+  it('播种为展开态 → 构造后直接可见（跨重启记住）', async () => {
+    const deps = makeDeps(defaultRhythmPreset())
+    deps.getAdvancedExpanded.mockResolvedValue(true)
+    const panel = new TuningPanel(fakeElement() as unknown as HTMLElement, deps)
+    await flush()
+    const body = panel.generalBodyForTest as unknown as FakeEl
+    expect(findByRole(body, 'rule-rows')!.style.display).toBe('')
+  })
+
+  it('收起不等于停更：收起时动宏旋钮，专业表值仍更新且保持收起', async () => {
+    const deps = makeDeps(defaultRhythmPreset())
+    const panel = new TuningPanel(fakeElement() as unknown as HTMLElement, deps)
+    await flush()
+    const body = panel.generalBodyForTest as unknown as FakeEl
+    expect(findByRole(body, 'rule-rows')!.style.display).toBe('none') // 前提：收起态
+
+    // 劲儿推到底 → 亮度·主源（均衡档主导）gain 变 1.5
+    const knob = rangeIn(findByRole(body, 'macro-knob-strength')!)
+    knob.value = '1'
+    knob.dispatch('change')
+
+    const rows = findByRole(panel.generalBodyForTest as unknown as FakeEl, 'rule-rows')!
+    expect(rows.style.display, '重建不许掀开折叠').toBe('none')
+    expect(rangeIn(findByRole(rows, 'rule-brightness-primary')!).value, '收起态下值仍须跟着更新').toBe('1.5')
   })
 })

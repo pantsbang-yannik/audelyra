@@ -10,7 +10,7 @@ import {
 } from 'three/tsl'
 import { BIN_COUNT } from './spectrum-bins'
 
-const PLANE_SIZE = 6.0      // 画板世界边长：罩住环(R1.15)+满长条+辉光+加宽后的波形线（fb1 4.6→6.0）
+const PLANE_SIZE = 17.0     // 画板世界边长：罩住环(R1.15)+满长条+辉光+波形线（波形宽度旋钮上限3×半宽2.7=8.1，画板半边须≥8.1 保软收不裁；6.0→17.0）
 const RING_R = 1.15         // 环半径：与粒子形状包围尺度同级（sphere 1.15）
 const CORE_W = 0.012        // 环芯半宽：图6 的"细亮实线"
 const HALO_W = 0.05         // 外晕指数衰减尺度
@@ -45,6 +45,7 @@ export class LineworkBody {
   private readonly uPulseBright = uniform(0) // 音画映射·亮度脉冲（幅度沿用粒子 4.6"点头级"纪律）
   private readonly uMapDensity = uniform(0) // 音画映射·密度（死线接活）：辉光浓度基量 0..1，0=中性
   private readonly uMapThick = uniform(0)   // 音画映射·厚度（死线接活）：线宽/条宽加粗基量 0..1，0=中性
+  private readonly uWaveWidth = uniform(1)  // 波形线横向宽度旋钮：WAVE_HALF_W 乘子（仅 waveform 分支消费，spectrum 无副作用），1=现状
   private readonly geo: THREE.PlaneGeometry
   private readonly mat: THREE.MeshBasicNodeMaterial
   private readonly orientTmp = new THREE.Object3D()
@@ -66,8 +67,9 @@ export class LineworkBody {
     // 环形：atan(x,y)∈(-π,π]，0=正上方；|·|/π 左右镜像 → 低频在顶、高频沉底（fb2 用户拍板翻转）
     const angN = abs(atan(p.x, p.y)).div(Math.PI)
     const ringBinF = angN.mul(BIN_COUNT).min(BIN_COUNT - 0.001)
-    // 线形：|x|/半宽 → 低频中央、高频向两端镜像（山峰轮廓）
-    const waveBinF = abs(p.x).div(WAVE_HALF_W).min(0.999).mul(BIN_COUNT)
+    // 线形：|x|/半宽 → 低频中央、高频向两端镜像（山峰轮廓）；半宽随「整体宽度」旋钮缩放
+    const waveHalfW = float(WAVE_HALF_W).mul(this.uWaveWidth)
+    const waveBinF = abs(p.x).div(waveHalfW).min(0.999).mul(BIN_COUNT)
     const binF = mix(ringBinF, waveBinF, this.uMode)
     const v = this.uBins.element(floor(binF))
     // 条间缝：桶内相位居中 62% 是条、两侧软缝
@@ -77,7 +79,7 @@ export class LineworkBody {
     // —— 频谱环分支 ——
     const r = length(p)
     // 环半径 = 鼓点 pop × 映射空间脉冲呼吸（fb3：uPulseSpace 对粒子撑舞台、对环撑半径，语义同源）
-    const popR = float(RING_R).mul(this.uKick.mul(KICK_POP).add(1)).mul(this.uPulseSpace.mul(0.05).add(1))
+    const popR = float(RING_R).mul(this.uKick.mul(KICK_POP).add(1)).mul(this.uPulseSpace.mul(0.08).add(1))
     const dRing = r.sub(popR).abs()
     const ringCore = smoothstep(float(0.0), float(CORE_W).mul(thickMul), dRing).oneMinus()
     const ringHalo = exp(dRing.div(HALO_W).negate()).mul(this.uEnergy.mul(0.2).add(0.3)).mul(this.uMapDensity.mul(MAP_GLOW_GAIN).add(1))
@@ -91,11 +93,11 @@ export class LineworkBody {
 
     // —— 波形线分支 ——
     // 条半高；无声=hairline 静线；映射空间脉冲抬摆幅（fb3，与环半径呼吸同源）
-    const h = v.mul(WAVE_MAX_H).mul(this.uUserBarH).mul(this.uPulseSpace.mul(0.12).add(1)).mul(barMask).add(HAIRLINE)
+    const h = v.mul(WAVE_MAX_H).mul(this.uUserBarH).mul(this.uPulseSpace.mul(0.2).add(1)).mul(barMask).add(HAIRLINE)
     const dY = abs(p.y).sub(h)
     const waveCore = smoothstep(float(0.0), float(0.012).mul(thickMul), dY).oneMinus()
     const waveGlow = exp(clamp(dY, 0.0, 10.0).div(0.06).negate()).mul(0.3).mul(this.uMapDensity.mul(MAP_GLOW_GAIN).add(1))
-    const xFade = smoothstep(WAVE_HALF_W - 0.15, WAVE_HALF_W, abs(p.x)).oneMinus() // 两端软收
+    const xFade = smoothstep(waveHalfW.sub(0.15), waveHalfW, abs(p.x)).oneMinus() // 两端软收（随整体宽度移动）
     const centerFlash = exp(abs(p.y).div(0.05).negate()).mul(this.uDrop).mul(0.9)  // drop 中线闪白
     const waveI = waveCore.add(waveGlow).mul(xFade).add(centerFlash)
 
@@ -105,8 +107,9 @@ export class LineworkBody {
       .mul(float(1).sub(this.uSleep.mul(0.85)))
       .mul(this.uOpacity)
       .mul(this.uUserBright)
-      .mul(this.uPulseBright.mul(0.18).add(1)) // 映射亮度脉冲（系数对齐粒子 lit 的 0.18）
-    const albedo = mix(vec3(this.uColA), vec3(this.uColC), clamp(intensity.mul(0.6), 0.0, 1.0))
+      .mul(this.uPulseBright.mul(0.3).add(1)) // 映射亮度脉冲（系数对齐粒子 lit 的 0.3）
+    // 色温层次（#光效精修 ③·推广）：原始 intensity + 高门槛 smoothstep 替代 clamp，腰部保饱和 uColA(显封面/背景色)、只有最亮核心才白
+    const albedo = mix(vec3(this.uColA), vec3(this.uColC), smoothstep(1.7, 5.0, intensity))
     this.mat.colorNode = albedo.mul(intensity)
     this.mat.opacityNode = clamp(intensity, 0.0, 1.0) // 帧缓冲 alpha 成形（premult 下不再乘进颜色）
 
@@ -124,7 +127,8 @@ export class LineworkBody {
     bins: Float32Array; kickEnv: number; drop: number
     sleep: number; energy: number; opacity: number
     colorA: THREE.Color; colorC: THREE.Color
-    brightness: number; barHeight: number // 调音台"形状专属·线条"旋钮（fb2）
+    brightness: number; barHeight: number // 调音台"主体·线条"旋钮（fb2）
+    waveWidth: number // 波形线横向宽度旋钮（仅 waveform 分支生效）
     pulseSpace: number; pulseBright: number // 音画映射脉冲（fb3：AudioVisualMapper 同帧输出）
     mapDensity: number; mapThick: number // 音画映射·密度/厚度（调音台规范化：死线接活，0=中性）
   }): void {
@@ -133,6 +137,7 @@ export class LineworkBody {
     for (let i = 0; i < BIN_COUNT; i++) arr[i] = inp.bins[i]
     this.uUserBright.value = inp.brightness
     this.uUserBarH.value = inp.barHeight
+    this.uWaveWidth.value = inp.waveWidth
     this.uPulseSpace.value = inp.pulseSpace
     this.uPulseBright.value = inp.pulseBright
     this.uMapDensity.value = inp.mapDensity

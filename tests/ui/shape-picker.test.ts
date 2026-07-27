@@ -131,13 +131,13 @@ async function flush(): Promise<void> {
 
 function makeDeps(overrides: Partial<ShapePickerDeps> = {}): ShapePickerDeps {
   return {
-    getShape: async () => ({ current: 'nebula', customCurrent: null, customShapes: [], coverPriority: true }),
+    getShape: async () => ({ current: 'nebula', customCurrent: null, customShapes: [], coverPriority: true, showBody: true }),
     setShape: vi.fn(),
     onShapeChanged: vi.fn(),
     // 背景三件必填 dep（自定义背景 v1）：既有形状用例不关心背景，给可运行的默认空实现即可
     getBackground: async () => ({
       aurora: 1, ripple: 1, dust: 0.7, dustSize: 1, dustBright: 1, mirror: true,
-      customBackgrounds: [], current: 'aurora', bgOpacity: 0.8, bgSaturation: 1, bgBreathe: true, bgShowBodies: false,
+      customBackgrounds: [], current: 'aurora', bgOpacity: 0.8, bgSaturation: 1, bgBreathe: true,
     }),
     setBackground: vi.fn(),
     onBackgroundChanged: vi.fn(),
@@ -221,23 +221,23 @@ describe('ShapePicker 骨架（B2 T2）', () => {
 })
 
 describe('卡片渲染与选中（B2 T3）', () => {
-  it('按注册表序渲染卡片（statue 退役后阵容9卡，label 中文仅显示层）', async () => {
+  it('按注册表序渲染卡片（statue/星球/晶体 退役后阵容7卡，label 中文仅显示层）', async () => {
     const parent = fakeElement()
     new ShapePicker(parent as unknown as HTMLElement, makeDeps())
     await flush()
-    const names = ['星云', '星球', '晶体', '心脏', '日食', '点阵', '激光']
+    const names = ['星云', '心脏', '日食', '点阵', '激光']
     const labels = collectText(parent).filter((t) => names.includes(t))
     expect(labels).toEqual(names)
   })
   it('当前形状卡带激活态（发光描边 box-shadow 非空），其余无', async () => {
     const parent = fakeElement()
     new ShapePicker(parent as unknown as HTMLElement, makeDeps({
-      getShape: async () => ({ current: 'sphere', customCurrent: null, customShapes: [], coverPriority: true }),
+      getShape: async () => ({ current: 'heart', customCurrent: null, customShapes: [], coverPriority: true, showBody: true }),
     }))
     await flush()
-    const sphere = findByAttr(parent, 'data-shape-id', 'sphere')!
+    const heart = findByAttr(parent, 'data-shape-id', 'heart')!
     const nebula = findByAttr(parent, 'data-shape-id', 'nebula')!
-    expect(sphere.style.boxShadow).not.toBe('')
+    expect(heart.style.boxShadow).not.toBe('')
     expect(nebula.style.boxShadow ?? '').toBe('')
   })
   it('点卡：setShape 收全量英文枚举 + 乐观高亮立即切换（不等回流）', async () => {
@@ -245,30 +245,30 @@ describe('卡片渲染与选中（B2 T3）', () => {
     const deps = makeDeps()
     new ShapePicker(parent as unknown as HTMLElement, deps)
     await flush()
-    const sphere = findByAttr(parent, 'data-shape-id', 'sphere')!
-    sphere.dispatch('click')
-    expect(deps.setShape).toHaveBeenCalledWith({ current: 'sphere', customCurrent: null, customShapes: [], coverPriority: true })
-    expect(sphere.style.boxShadow).not.toBe('') // 乐观：点卡即高亮（B1 终审 B2 注意项）
+    const heart = findByAttr(parent, 'data-shape-id', 'heart')!
+    heart.dispatch('click')
+    expect(deps.setShape).toHaveBeenCalledWith({ current: 'heart', customCurrent: null, customShapes: [], coverPriority: true, showBody: true })
+    expect(heart.style.boxShadow).not.toBe('') // 乐观：点卡即高亮（B1 终审 B2 注意项）
   })
-  it('回流兜底：onShapeChanged 送 sphere → 高亮校正到星球卡', async () => {
+  it('回流兜底：onShapeChanged 送 heart → 高亮校正到心脏卡', async () => {
     const parent = fakeElement()
     let cb: ((s: unknown) => void) | null = null
     new ShapePicker(parent as unknown as HTMLElement, makeDeps({
       onShapeChanged: (f) => { cb = f as never },
     }))
     await flush()
-    cb!({ current: 'sphere', coverPriority: true })
-    expect(findByAttr(parent, 'data-shape-id', 'sphere')!.style.boxShadow).not.toBe('')
+    cb!({ current: 'heart', coverPriority: true })
+    expect(findByAttr(parent, 'data-shape-id', 'heart')!.style.boxShadow).not.toBe('')
   })
-  it('错峰浮现：九卡 transition-delay 分别为 0/70/.../560ms（open 时）', async () => {
+  it('错峰浮现：七卡 transition-delay 分别为 0/70/.../420ms（open 时）', async () => {
     const parent = fakeElement()
     const p = new ShapePicker(parent as unknown as HTMLElement, makeDeps())
     await flush()
     p.open()
-    const delays = ['nebula', 'sphere', 'crystal', 'heart', 'spectrum', 'waveform', 'eclipse', 'ledmatrix', 'laser'].map(
+    const delays = ['nebula', 'heart', 'spectrum', 'waveform', 'eclipse', 'ledmatrix', 'laser'].map(
       (id) => findByAttr(parent, 'data-shape-id', id)!.style.transitionDelay
     )
-    expect(delays).toEqual(['0ms', '70ms', '140ms', '210ms', '280ms', '350ms', '420ms', '490ms', '560ms'])
+    expect(delays).toEqual(['0ms', '70ms', '140ms', '210ms', '280ms', '350ms', '420ms'])
   })
 })
 
@@ -288,7 +288,7 @@ describe('封面优先胶囊开关（B2 T4）', () => {
     const pill = findByText(parent, '有封面时优先显示封面粒子')!._parent!
     const toggleHost = pill.children[pill.children.length - 1]
     toggleHost.children[0].dispatch('click')
-    expect(deps.setShape).toHaveBeenCalledWith({ current: 'nebula', customCurrent: null, customShapes: [], coverPriority: false })
+    expect(deps.setShape).toHaveBeenCalledWith({ current: 'nebula', customCurrent: null, customShapes: [], coverPriority: false, showBody: true })
   })
 
   it('回流兜底：onShapeChanged 送 coverPriority=false → 开关视觉态跟随（setChecked 被调）', async () => {
@@ -328,7 +328,7 @@ describe('选择器单行横滑（S1 T6）', () => {
 
 const UID1 = '00000001-0000-4000-8000-000000000000'
 const textMeta = { id: UID1, kind: 'text' as const, text: '告白' }
-const baseShape = { current: 'nebula' as const, customCurrent: null, customShapes: [textMeta], coverPriority: true }
+const baseShape = { current: 'nebula' as const, customCurrent: null, customShapes: [textMeta], coverPriority: true, showBody: true }
 
 /** custom-shapes 相关 deps 的默认 stub：四个新回调均给可运行的空实现，测试按需覆盖 */
 function makeCustomDeps(overrides: Partial<ShapePickerDeps> = {}): ShapePickerDeps {
@@ -342,14 +342,14 @@ function makeCustomDeps(overrides: Partial<ShapePickerDeps> = {}): ShapePickerDe
 }
 
 describe('shape-picker · 自定义收藏卡（idea #12）', () => {
-  it('内置 9 卡之后渲染收藏卡与"+"卡', async () => {
+  it('内置 7 卡之后渲染收藏卡与"+"卡', async () => {
     const parent = fakeElement()
     new ShapePicker(parent as unknown as HTMLElement, makeCustomDeps({
       getShape: async () => baseShape,
     }))
     await flush()
     const cardRow = findByAttr(parent, 'data-shape-id', 'nebula')!._parent!
-    expect(cardRow.children.length).toBe(9 + 1 + 1)
+    expect(cardRow.children.length).toBe(7 + 1 + 1)
     expect(collectText(parent)).toContain('告白')
   })
 
@@ -363,10 +363,10 @@ describe('shape-picker · 自定义收藏卡（idea #12）', () => {
     expect(deps.setShape).toHaveBeenLastCalledWith(
       expect.objectContaining({ customCurrent: UID1 })
     )
-    const sphere = findByAttr(parent, 'data-shape-id', 'sphere')!
-    sphere.dispatch('click')
+    const heart = findByAttr(parent, 'data-shape-id', 'heart')!
+    heart.dispatch('click')
     expect(deps.setShape).toHaveBeenLastCalledWith(
-      expect.objectContaining({ current: 'sphere', customCurrent: null })
+      expect.objectContaining({ current: 'heart', customCurrent: null })
     )
   })
 
@@ -395,7 +395,7 @@ describe('shape-picker · 自定义收藏卡（idea #12）', () => {
       text: `第${i}条`,
     }))
     const deps = makeCustomDeps({
-      getShape: async () => ({ current: 'nebula' as const, customCurrent: null, customShapes: fullShapes, coverPriority: true }),
+      getShape: async () => ({ current: 'nebula' as const, customCurrent: null, customShapes: fullShapes, coverPriority: true, showBody: true }),
     })
     new ShapePicker(parent as unknown as HTMLElement, deps)
     await flush()
@@ -409,7 +409,7 @@ describe('shape-picker · 自定义收藏卡（idea #12）', () => {
     const parent = fakeElement()
     const imgMeta = { id: UID1, kind: 'image' as const }
     new ShapePicker(parent as unknown as HTMLElement, makeCustomDeps({
-      getShape: async () => ({ current: 'nebula' as const, customCurrent: null, customShapes: [imgMeta], coverPriority: true }),
+      getShape: async () => ({ current: 'nebula' as const, customCurrent: null, customShapes: [imgMeta], coverPriority: true, showBody: true }),
       readCustomShapeImage: undefined,
     }))
     await flush()
@@ -426,7 +426,7 @@ describe('shape-picker · 自定义收藏卡（idea #12）', () => {
       const parent = fakeElement()
       const imgMeta = { id: UID1, kind: 'image' as const }
       new ShapePicker(parent as unknown as HTMLElement, makeCustomDeps({
-        getShape: async () => ({ current: 'nebula' as const, customCurrent: null, customShapes: [imgMeta], coverPriority: true }),
+        getShape: async () => ({ current: 'nebula' as const, customCurrent: null, customShapes: [imgMeta], coverPriority: true, showBody: true }),
         readCustomShapeImage: async () => new Uint8Array([1, 2, 3]),
       }))
       await flush()
@@ -446,7 +446,7 @@ describe('shape-picker · 自定义收藏卡（idea #12）', () => {
     try {
       const parent = fakeElement()
       const imgMeta = { id: UID1, kind: 'image' as const }
-      const shapeWithImg = { current: 'nebula' as const, customCurrent: null, customShapes: [imgMeta], coverPriority: true }
+      const shapeWithImg = { current: 'nebula' as const, customCurrent: null, customShapes: [imgMeta], coverPriority: true, showBody: true }
       // 第一次 read 挂起（旧卡回调迟到），第二次立即 resolve（新卡先落位）
       let releaseFirst!: (b: Uint8Array) => void
       let call = 0
@@ -477,7 +477,7 @@ describe('shape-picker · 自定义收藏卡（idea #12）', () => {
     const parent = fakeElement()
     let cb: ((s: unknown) => void) | null = null
     const deps = makeCustomDeps({
-      getShape: async () => ({ current: 'nebula' as const, customCurrent: null, customShapes: [], coverPriority: true }),
+      getShape: async () => ({ current: 'nebula' as const, customCurrent: null, customShapes: [], coverPriority: true, showBody: true }),
       onShapeChanged: (f) => { cb = f as never },
     })
     new ShapePicker(parent as unknown as HTMLElement, deps)
@@ -498,7 +498,7 @@ const BG_ID = '11111111-2222-3333-4444-555555555555'
 function makeBg(over: Partial<BackgroundSettings> = {}): BackgroundSettings {
   return {
     aurora: 1, ripple: 1, dust: 0.7, dustSize: 1, dustBright: 1, mirror: true,
-    customBackgrounds: [{ id: BG_ID, kind: 'image' }], current: 'aurora', bgOpacity: 0.8, bgSaturation: 1, bgBreathe: true, bgShowBodies: false, ...over,
+    customBackgrounds: [{ id: BG_ID, kind: 'image' }], current: 'aurora', bgOpacity: 0.8, bgSaturation: 1, bgBreathe: true, ...over,
   }
 }
 
@@ -644,13 +644,13 @@ describe('卡片编辑钮（v2 亲验反馈②：所有内容卡 hover 渐显，
   const BG_ID = '11111111-2222-3333-4444-666666666666'
   const seededDeps = (overrides: Partial<ShapePickerDeps> = {}): ShapePickerDeps => makeDeps({
     getShape: async () => ({
-      current: 'nebula', customCurrent: null, coverPriority: true,
+      current: 'nebula', customCurrent: null, coverPriority: true, showBody: true,
       customShapes: [{ id: SHAPE_ID, kind: 'text', text: '编' }],
     }),
     getBackground: async () => ({
       aurora: 1, ripple: 1, dust: 0.7, dustSize: 1, dustBright: 1, mirror: true,
       customBackgrounds: [{ id: BG_ID, kind: 'image' }], current: 'aurora',
-      bgOpacity: 0.8, bgSaturation: 1, bgBreathe: true, bgShowBodies: false,
+      bgOpacity: 0.8, bgSaturation: 1, bgBreathe: true,
     }),
     ...overrides,
   })
@@ -716,7 +716,7 @@ describe('卡片显示名与底部暗幕（亲验反馈）', () => {
       getBackground: async () => ({
         aurora: 1, ripple: 1, dust: 0.7, dustSize: 1, dustBright: 1, mirror: true,
         customBackgrounds: [{ id: BG_ID, kind: 'video', name: '月夜漫游' }], current: 'aurora',
-        bgOpacity: 0.8, bgSaturation: 1, bgBreathe: true, bgShowBodies: false,
+        bgOpacity: 0.8, bgSaturation: 1, bgBreathe: true,
       }),
     }))
     await flush()

@@ -48,6 +48,17 @@ describe('NebulaMotionProgram（封面/星云方言：幅度合成/三幕/光敏
     expect(u.uFlash.value).toBeLessThanOrEqual(0.35 * 0.65)
     expect(inst.chroma).toBeGreaterThan(0.5)
   })
+  it('闪光缓入（#光效精修 ③）：触发后前几帧值上涨（attack 涌起），而非瞬时跳峰再衰减', () => {
+    const u = mkU()
+    const p = new NebulaMotionProgram(u)
+    p.update(DT, mkInp(), S()) // steady
+    p.update(DT, mkInp({ narrative: { phase: 'burst', progress: 1 } }), S()) // burst 边沿触发，第 1 帧
+    const f1 = u.uFlash.value
+    p.update(DT, mkInp({ narrative: { phase: 'burst', progress: 1 } }), S()) // 第 2 帧（不再重触发）
+    p.update(DT, mkInp({ narrative: { phase: 'burst', progress: 1 } }), S()) // 第 3 帧，仍在 50ms attack 内
+    const f3 = u.uFlash.value
+    expect(f3).toBeGreaterThan(f1) // ArPulse 缓入涌起（瞬时 Pulse 会立刻衰减导致 f3<f1）
+  })
   it('光敏安全：0.5s 内第二次触发被吞（强拍连击不连闪）', () => {
     const u = mkU()
     const p = new NebulaMotionProgram(u)

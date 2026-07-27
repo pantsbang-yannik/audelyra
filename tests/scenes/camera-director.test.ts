@@ -191,6 +191,38 @@ describe('默认距离偏好 distScale（站位远近等比缩放，用户拍板
     expect(cam.position.length()).toBeGreaterThan(2.8)
     expect(cam.position.length()).toBeLessThan(3.2)
   })
+  it('滚轮改默认距离 distScale：调到哪粘到哪（不飘回）+ 冒泡新值给持久化，钳到 [0.5,3]', () => {
+    const listeners: Record<string, (e: unknown) => void> = {}
+    const dom = {
+      addEventListener: (n: string, f: (e: unknown) => void) => { listeners[n] = f },
+      removeEventListener: () => {},
+    } as unknown as HTMLElement
+    const cam = new THREE.PerspectiveCamera()
+    const d = new CameraDirector(cam, dom)
+    const emitted: number[] = []
+    d.setOnDistScaleChange((v) => emitted.push(v))
+    // 每帧注入闭包源（复刻 index.ts:setDistScale 每帧覆写）：滚轮回调把新值写回源，才不被下一帧冲掉
+    let src = 1
+    d.setDistScale(src)
+
+    // 向下滚（拉远）：distScale 应升、冒泡一次新值
+    listeners['wheel']({ deltaY: 200, preventDefault: () => {} })
+    expect(emitted.length).toBe(1)
+    src = emitted[emitted.length - 1]
+    expect(src).toBeGreaterThan(1)
+
+    // 静息 5s：无飘回——滚轮改的是永久默认距离，不是 4s 后归零的临时偏移
+    const farScale = src
+    for (let i = 0; i < 300; i++) { d.setDistScale(src); d.update(1 / 60, null, 0) }
+    expect(src).toBeCloseTo(farScale) // 源未被自动归位改动
+
+    // 滚轮拉满仍钳在上限 3（不越界）
+    listeners['wheel']({ deltaY: 1e6, preventDefault: () => {} })
+    src = emitted[emitted.length - 1]
+    expect(src).toBeLessThanOrEqual(3 + 1e-9)
+    expect(src).toBeGreaterThan(2.9)
+    d.dispose()
+  })
   it('量程两端不被安全钳压平：0.5→~1.5（钳位随倍率缩放，非压到 1.6）/ 3→~9.0（非压到 4.6）', () => {
     const camA = new THREE.PerspectiveCamera()
     const camB = new THREE.PerspectiveCamera()
@@ -256,8 +288,8 @@ describe('手动极限拖拽集成：相机永不穿镜面', () => {
     listeners['wheel']({ deltaY: 1e6, preventDefault: () => {} })
     listeners['pointerdown']({ clientX: 0, clientY: 0 })
     listeners['pointermove']({ clientX: 0, clientY: 1e6 }) // pitch 顶到 +PITCH_LIMIT
-    // 不派发 pointerup：它注册在 window（camera-director.ts:189）而非 dom 桩；
-    // dragging 悬置不影响断言——manualProxy 的 pitch/dist 已到极值即为被测状态
+    // 不派发 pointerup：它注册在 window（camera-director.ts）而非 dom 桩；
+    // dragging 悬置不影响断言——distScale 顶格（滚轮拉满）+ manualProxy.pitch 到极值即为被测状态
     for (let i = 0; i < 120; i++) {
       d.update(1 / 60, null, 0)
       expect(cam.position.y).toBeGreaterThanOrEqual(MIRROR_Y + 0.15 - 1e-6)

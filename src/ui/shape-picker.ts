@@ -56,13 +56,6 @@ const SILHOUETTES: Partial<Record<ShapeId, string>> = {
     '<circle cx="20" cy="9" r="1.5" fill="currentColor" stroke="none" opacity=".5"/>' +
     '<circle cx="30" cy="13" r="1.4" fill="currentColor" stroke="none" opacity=".45"/>' +
     '<circle cx="27" cy="26" r="1.3" fill="currentColor" stroke="none" opacity=".4"/>',
-  sphere:
-    '<circle cx="19" cy="19" r="12" stroke-dasharray="2 3"/>' +
-    '<ellipse cx="19" cy="19" rx="12" ry="4.5" stroke-dasharray="2 3" opacity=".6"/>',
-  crystal:
-    '<path d="M19 5 L31 12 L31 26 L19 33 L7 26 L7 12 Z" stroke-dasharray="2.5 2.5"/>' +
-    '<path d="M19 5 L19 33 M7 12 L31 26 M31 12 L7 26" stroke-dasharray="1.5 3" opacity=".5"/>' +
-    '<circle cx="19" cy="19" r="3" fill="currentColor" stroke="none" opacity=".5"/>',
   heart:
     '<path d="M19 9 C 16 6, 11 7, 10 12 C 9 18, 12 26, 18 31 C 24 27, 29 20, 28 13 C 27.5 8, 22 6, 20 10 Z" stroke-dasharray="2.5 2.5"/>' +
     '<path d="M16 6 L 16 10 M 21 5 L 20.5 9 M 25 7 L 23.5 10" stroke-dasharray="1.5 2" opacity=".6"/>',

@@ -5,7 +5,7 @@ import {
   type MappingValues, type TargetMapping, type VisualTarget,
 } from './types'
 
-export const GAIN_MAX = 4
+export const GAIN_MAX = 2 // 收窄自 4：配合软限幅（CAP 1.25），保证滑块全行程都有可感增量；旧存档超界值由 sanitize 自动夹回
 export const SMOOTHING_MAX_MS = 2000
 const CURVES: MappingCurve[] = ['linear', 'ease', 'punch', 'softClip']
 const clamp = (x: number, lo: number, hi: number) => (x < lo ? lo : x > hi ? hi : x)

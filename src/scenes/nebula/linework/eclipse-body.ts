@@ -61,7 +61,7 @@ export class EclipseBody {
     const densMul = this.uMapDensity.mul(MAP_GLOW_GAIN).add(1)
 
     // 盘半径：鼓点微 pop × 空间脉冲微撑（与频谱环 popR 同语义）
-    const discR = float(DISC_R).mul(this.uKick.mul(KICK_POP).add(1)).mul(this.uPulseSpace.mul(0.04).add(1))
+    const discR = float(DISC_R).mul(this.uKick.mul(KICK_POP).add(1)).mul(this.uPulseSpace.mul(0.07).add(1))
     // 日冕：盘缘向外指数衰减，能量呼吸浓度，旋钮 uCorona 整体控厚薄
     const corona = exp(r.sub(discR).max(0.0).div(CORONA_W).negate())
       .mul(this.uEnergy.mul(0.5).add(0.55)).mul(densMul).mul(this.uCorona)
@@ -78,7 +78,7 @@ export class EclipseBody {
     const halfGap = this.uWaveGap.mul(0.5)
     const barMask = smoothstep(halfGap, halfGap.add(0.08), f)
       .mul(smoothstep(float(1).sub(halfGap).sub(0.08), float(1).sub(halfGap), f).oneMinus())
-    const h = v.mul(WAVE_MAX_H).mul(this.uPulseSpace.mul(0.12).add(1)).mul(barMask).add(HAIRLINE)
+    const h = v.mul(WAVE_MAX_H).mul(this.uPulseSpace.mul(0.2).add(1)).mul(barMask).add(HAIRLINE)
     const dY = abs(p.y).sub(h)
     const waveCore = smoothstep(float(0.0), float(0.012).mul(thickMul), dY).oneMinus()
     const waveGlow = exp(clamp(dY, 0.0, 10.0).div(0.05).negate()).mul(0.35).mul(densMul)
@@ -92,8 +92,11 @@ export class EclipseBody {
       .mul(this.uKick.mul(KICK_GLOW).add(1))
       .mul(float(1).sub(this.uSleep.mul(0.85)))
       .mul(this.uOpacity).mul(this.uUserBright)
-      .mul(this.uPulseBright.mul(0.18).add(1))
-    const albedo = mix(vec3(this.uColA), vec3(this.uColC), clamp(intensity.mul(0.6), 0.0, 1.0))
+      .mul(this.uPulseBright.mul(0.3).add(1))
+    // 色温层次（#光效精修 ③·推广，用户参考图「白核 + 饱和彩身」）：用原始 intensity + 高门槛 smoothstep
+    // 替代原 clamp(intensity*0.6)——后者亮度稍高(>1.67)就冲到 1、整片白，把封面/背景色盖掉（用户反馈
+    // 频谱环显不出封面色）。改为发光腰部保持饱和 uColA(随封面/背景走)，只有最亮核心[1.7,5]才过渡到近白 uColC。
+    const albedo = mix(vec3(this.uColA), vec3(this.uColC), smoothstep(1.7, 5.0, intensity))
     this.glowMat.colorNode = albedo.mul(intensity)
     this.glowMat.opacityNode = clamp(intensity, 0.0, 1.0)
 

@@ -65,12 +65,13 @@ export class NebulaPost {
         mix(radial.b, bC, saturate(chromaAmt)),
       )
 
-      // 黑是奢侈品：高阈值、克制强度——bloom 只属于少数高亮粒子。
+      // 锐核通透（#光效精修 ③·二版，用户反馈「糊」）：黑是奢侈品——收紧 bloom 让光核锐利、光晕小而透，
+      // 不再把亮部晕成一团肉糊。radius 0.55→0.3（光晕收紧）、threshold 0.75→0.8（更少粒子参与辉光，去糊主刀）。
       // 吃 trailedColor 而非原始 color：光迹也要被辉光包裹（管线顺序：scenePass → afterImage → +bloom）
       this.bloomPass = bloom(trailedColor)
-      this.bloomPass.threshold.value = 0.75
+      this.bloomPass.threshold.value = 0.8
       this.bloomPass.strength.value = this.baseStrength
-      this.bloomPass.radius.value = 0.55
+      this.bloomPass.radius.value = 0.3
       const withBloom = withFx.add(this.bloomPass) // bloom 输入仍是 trailedColor（亮度提取不吃模糊，防辉光糊化）
 
       // 暗部抖动必须接在色调映射之后：AgX 对暗部有非线性压缩，映射前叠加的线性 ±1/255 噪声

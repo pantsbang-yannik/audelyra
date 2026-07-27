@@ -2,11 +2,12 @@ import { describe, it, expect } from 'vitest'
 import { mkdtempSync, writeFileSync, readFileSync, existsSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { DEFAULT_SETTINGS, sanitizeSettings, SettingsStore } from '../../electron/settings'
+import { DEFAULT_SETTINGS, sanitizeSettings, SettingsStore, type AudelyraSettings } from '../../electron/settings'
 import { defaultRhythmPreset } from '../../src/scenes/nebula/mapping/spec'
 import { DEFAULT_LYRICS_SETTINGS } from '../../src/scenes/nebula/lyrics/lyrics-fx'
 import { DEFAULT_CAMERA_SETTINGS } from '../../src/scenes/nebula/camera-types'
 import { DEFAULT_BACKGROUND_SETTINGS } from '../../src/scenes/nebula/background-types'
+import { DEFAULT_MACRO_KNOBS } from '../../src/scenes/nebula/mapping/macro'
 
 const tmpFile = (): string => join(mkdtempSync(join(tmpdir(), 'audelyra-settings-')), 'settings.json')
 
@@ -165,28 +166,28 @@ describe('SettingsStore', () => {
 describe('shape 设置（Phase B1 T8）', () => {
   it('sanitize：坏枚举/缺字段回默认 {nebula, coverPriority:false}（发布准备③ 封面默认关）', () => {
     const s = sanitizeSettings({ shape: { current: 'cube', coverPriority: 1 } })
-    expect(s.shape).toEqual({ current: 'nebula', customCurrent: null, customShapes: [], coverPriority: false })
-    expect(sanitizeSettings({}).shape).toEqual({ current: 'nebula', customCurrent: null, customShapes: [], coverPriority: false })
+    expect(s.shape).toEqual({ current: 'nebula', customCurrent: null, customShapes: [], coverPriority: false, showBody: true })
+    expect(sanitizeSettings({}).shape).toEqual({ current: 'nebula', customCurrent: null, customShapes: [], coverPriority: false, showBody: true })
   })
 
   it('set/get 往返保留合法值，get 返回深拷贝（改返回值不污染内部）', () => {
     const store = new SettingsStore(tmpFile())
-    const out = store.set({ shape: { current: 'sphere', coverPriority: false, customCurrent: null, customShapes: [] } })
-    expect(out.shape).toEqual({ current: 'sphere', customCurrent: null, customShapes: [], coverPriority: false })
+    const out = store.set({ shape: { current: 'heart', coverPriority: false, customCurrent: null, customShapes: [], showBody: true } })
+    expect(out.shape).toEqual({ current: 'heart', customCurrent: null, customShapes: [], coverPriority: false, showBody: true })
     out.shape.current = 'nebula'
-    expect(store.get().shape.current).toBe('sphere')
+    expect(store.get().shape.current).toBe('heart')
   })
 
   it('防回声（评审 I4）：set 无关字段不误判 shape 变更——不广播', () => {
     const store = new SettingsStore(tmpFile())
-    store.set({ shape: { current: 'sphere', coverPriority: true, customCurrent: null, customShapes: [] } })
+    store.set({ shape: { current: 'heart', coverPriority: true, customCurrent: null, customShapes: [], showBody: true } })
     let calls = 0
     store.subscribe(() => { calls++ })
     store.set({ preventSleep: true }) // 无关标量：应且仅应广播这一次
     expect(calls).toBe(1)
     store.set({ preventSleep: true }) // 完全无变化：不广播（shape 若被误判会破坏此短路）
     expect(calls).toBe(1)
-    store.set({ shape: { current: 'sphere', coverPriority: true, customCurrent: null, customShapes: [] } }) // shape 同值：不广播
+    store.set({ shape: { current: 'heart', coverPriority: true, customCurrent: null, customShapes: [], showBody: true } }) // shape 同值：不广播
     expect(calls).toBe(1)
   })
 })
@@ -222,5 +223,121 @@ describe('background 设置（虚空之镜 Task 1）', () => {
     // 三个越界值各自钳到量程端点（字面量即被测行为本身），其余字段回默认
     expect(sanitizeSettings({ background: { aurora: 5, ripple: -2, dust: 2 } }).background)
       .toEqual({ ...DEFAULT_BACKGROUND_SETTINGS, aurora: 1, ripple: 0, dust: 1 })
+  })
+})
+
+describe('settings：宏旋钮标量 macroKnobs', () => {
+  it('缺省时给默认（均衡档 + 两个 0.5）', () => {
+    expect(sanitizeSettings({}).macroKnobs).toEqual(DEFAULT_MACRO_KNOBS)
+  })
+
+  it('越界值被夹到 0..1', () => {
+    expect(sanitizeSettings({ macroKnobs: { style: 'ambient', strength: 9, response: -3 } }).macroKnobs)
+      .toEqual({ style: 'ambient', strength: 1, response: 0 })
+  })
+
+  it('set 持久化并广播 macroKnobs', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'audelyra-macro-'))
+    const store = new SettingsStore(join(dir, 'settings.json'))
+    let broadcast: AudelyraSettings | null = null
+    store.subscribe((s) => { broadcast = s })
+    store.set({ macroKnobs: { style: 'balanced', strength: 0.8, response: 0.2 } })
+    expect(store.get().macroKnobs).toEqual({ style: 'balanced', strength: 0.8, response: 0.2 })
+    expect(broadcast!.macroKnobs).toEqual({ style: 'balanced', strength: 0.8, response: 0.2 })
+  })
+})
+
+const CUSTOM_BG = '33333333-3333-4333-8333-333333333333'
+
+describe('settings：主体显隐迁移与联动', () => {
+  it('老存档迁移：正在用自定义背景且旧开关未开 → 主体保持隐藏（升级不变脸）', () => {
+    const s = sanitizeSettings({
+      background: { current: CUSTOM_BG, customBackgrounds: [{ id: CUSTOM_BG, kind: 'image' }], bgShowBodies: false },
+      shape: { current: 'nebula' },
+    })
+    expect(s.shape.showBody).toBe(false)
+  })
+
+  it('老存档迁移：正在用自定义背景但旧开关开着 → 主体显示', () => {
+    const s = sanitizeSettings({
+      background: { current: CUSTOM_BG, customBackgrounds: [{ id: CUSTOM_BG, kind: 'image' }], bgShowBodies: true },
+      shape: { current: 'nebula' },
+    })
+    expect(s.shape.showBody).toBe(true)
+  })
+
+  it('老存档迁移：用内置背景 → 主体显示', () => {
+    expect(sanitizeSettings({ background: { current: 'aurora', bgShowBodies: false }, shape: {} }).shape.showBody)
+      .toBe(true)
+  })
+
+  it('新存档已有 showBody → 原样采用，不被迁移覆盖', () => {
+    const s = sanitizeSettings({
+      background: { current: CUSTOM_BG, customBackgrounds: [{ id: CUSTOM_BG, kind: 'image' }], bgShowBodies: false },
+      shape: { current: 'nebula', showBody: true },
+    })
+    expect(s.shape.showBody).toBe(true)
+  })
+
+  it('联动A：切到自定义背景 → 主体关；切回内置 → 主体开', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'audelyra-body-'))
+    const store = new SettingsStore(join(dir, 'settings.json'))
+    const bg = store.get().background
+    store.set({ background: { ...bg, customBackgrounds: [{ id: CUSTOM_BG, kind: 'image' }], current: CUSTOM_BG } })
+    expect(store.get().shape.showBody).toBe(false)
+    store.set({ background: { ...store.get().background, current: 'aurora' } })
+    expect(store.get().shape.showBody).toBe(true)
+  })
+
+  it('联动B：主体关着时换形状 → 自动打开', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'audelyra-body2-'))
+    const store = new SettingsStore(join(dir, 'settings.json'))
+    const bg = store.get().background
+    store.set({ background: { ...bg, customBackgrounds: [{ id: CUSTOM_BG, kind: 'image' }], current: CUSTOM_BG } })
+    expect(store.get().shape.showBody).toBe(false) // 前提：已被联动关掉
+
+    store.set({ shape: { ...store.get().shape, current: 'heart' } })
+    expect(store.get().shape.showBody).toBe(true)
+  })
+
+  it('拨封面优先不误开主体（两个形状 id 都没变）', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'audelyra-body3-'))
+    const store = new SettingsStore(join(dir, 'settings.json'))
+    const bg = store.get().background
+    store.set({ background: { ...bg, customBackgrounds: [{ id: CUSTOM_BG, kind: 'image' }], current: CUSTOM_BG } })
+    expect(store.get().shape.showBody).toBe(false)
+
+    store.set({ shape: { ...store.get().shape, coverPriority: true } })
+    expect(store.get().shape.showBody, '只改 coverPriority 不该开主体').toBe(false)
+  })
+
+  it('内置背景下手动关掉的主体，读盘后仍是关的（新能力的持久化）', () => {
+    expect(sanitizeSettings({ background: { current: 'aurora' }, shape: { showBody: false } }).shape.showBody)
+      .toBe(false)
+  })
+})
+
+describe('settings：高级调整折叠态 tuningAdvancedExpanded', () => {
+  it('缺省时收起（false）', () => {
+    expect(sanitizeSettings({}).tuningAdvancedExpanded).toBe(false)
+  })
+
+  it('非布尔值回退默认', () => {
+    expect(sanitizeSettings({ tuningAdvancedExpanded: 'yes' }).tuningAdvancedExpanded).toBe(false)
+    expect(sanitizeSettings({ tuningAdvancedExpanded: 1 }).tuningAdvancedExpanded).toBe(false)
+  })
+
+  it('合法布尔原样采用', () => {
+    expect(sanitizeSettings({ tuningAdvancedExpanded: true }).tuningAdvancedExpanded).toBe(true)
+  })
+
+  it('set 持久化并广播', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'audelyra-adv-'))
+    const store = new SettingsStore(join(dir, 'settings.json'))
+    let broadcast: AudelyraSettings | null = null
+    store.subscribe((s) => { broadcast = s })
+    store.set({ tuningAdvancedExpanded: true })
+    expect(store.get().tuningAdvancedExpanded).toBe(true)
+    expect(broadcast!.tuningAdvancedExpanded).toBe(true)
   })
 })

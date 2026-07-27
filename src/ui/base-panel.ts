@@ -22,6 +22,8 @@ export class BasePanel {
   readonly retreatProfile: UiFocusProfile
   /** 内容挂载点：子类/消费者往这里加行，容器另有独立的 sticky 标题栏 */
   protected readonly content: HTMLElement
+  /** 固定区：标题栏与滚动内容之间的不滚动段（tab 栏等常驻控件挂这里，随标题一起固定） */
+  private readonly fixedRegion: HTMLElement
 
   private readonly container: HTMLElement
   /** 场景暗幕（亲验反馈轮②）：面板开启时窗口右侧从左往右渐入黑，可读性来自舞台侧幕布——
@@ -108,6 +110,10 @@ export class BasePanel {
       border-bottom: 1px solid rgba(255, 255, 255, 0.08);
     `
 
+    // 固定区：紧贴标题栏下方、滚动内容之上的不滚动段（flex:none 与标题栏同为固定段，非 overflow 区）
+    this.fixedRegion = document.createElement('div')
+    this.fixedRegion.style.cssText = 'flex: none; padding: 0 4px;' // 水平内边距对齐标题栏/内容区
+
     this.content = document.createElement('div')
     this.content.style.cssText = `
       overflow-y: auto;
@@ -116,6 +122,7 @@ export class BasePanel {
     `
 
     this.container.appendChild(header)
+    this.container.appendChild(this.fixedRegion)
     this.container.appendChild(this.content)
     parent.appendChild(this.scrim) // 先挂先画：幕布垫在面板之下
     parent.appendChild(this.container)
@@ -124,6 +131,11 @@ export class BasePanel {
   /** 供子类往内容区加行（标题栏之外，从上往下排列） */
   protected appendRow(el: HTMLElement): void {
     this.content.appendChild(el)
+  }
+
+  /** 供子类往固定区加控件（tab 栏等）：随标题栏固定，不随内容滚动 */
+  protected appendFixed(el: HTMLElement): void {
+    this.fixedRegion.appendChild(el)
   }
 
   get isOpen(): boolean {

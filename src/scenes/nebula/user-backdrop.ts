@@ -4,6 +4,7 @@
 // 亮度呼吸：0.85~1.05 随响度 + 沉睡压暗（亮度纪律同 sky.ts），防静态图在动态粒子后显得死板。
 import * as THREE from 'three/webgpu'
 import { texture, uniform, uv, vec3, mix } from 'three/tsl'
+import { extractDominant, remapToMood, type MoodPalette } from '../shared/palette'
 
 /** 图字节读取注入（先例 setCustomShapeFetcher）：渲染层不碰 IPC，main.ts 接线时注入 */
 let fetchBackground: ((id: string) => Promise<Uint8Array>) | null = null
@@ -21,6 +22,27 @@ export function coverUv(imgAspect: number, viewAspect: number): { sx: number; sy
   }
   const sy = imgAspect / viewAspect
   return { sx: 1, sy, ox: 0, oy: (1 - sy) / 2 }
+}
+
+/** 背景取色（#背景取色 ②）：小画布降采样 → getImageData → 复用封面同款 extractDominant→remapToMood，
+ * 保证背景与封面走同一调色台铁律、色调一致。source 支持 ImageBitmap / 视频元素；失败回 null（node 测试无 document 亦回 null）。 */
+function extractMood(source: CanvasImageSource, w: number, h: number): MoodPalette | null {
+  try {
+    if (typeof document === 'undefined' || !Number.isFinite(w) || !Number.isFinite(h) || w < 1 || h < 1) return null
+    const S = 64 // 取色只需主色相，64px 足够且极廉价
+    const scale = Math.min(1, S / Math.max(w, h))
+    const cw = Math.max(1, Math.round(w * scale))
+    const ch = Math.max(1, Math.round(h * scale))
+    const canvas = document.createElement('canvas')
+    canvas.width = cw
+    canvas.height = ch
+    const ctx = canvas.getContext('2d', { willReadFrequently: true })
+    if (!ctx) return null
+    ctx.drawImage(source, 0, 0, cw, ch)
+    return remapToMood(extractDominant(ctx.getImageData(0, 0, cw, ch)))
+  } catch {
+    return null // 跨域污染/首帧未就绪等：静默回落封面色
+  }
 }
 
 const BACKDROP_DIST = 30 // 相机前方距离：运镜半径 ~13.8 之外、穹顶半径 40 之内（虽互斥不共存，量级对齐）
@@ -49,6 +71,9 @@ export class UserBackdrop {
   private fade = 0
   private imgAspect = 1
   private gen = 0 // 代际守卫：连点多卡时迟到的加载不覆盖新选择
+  // 背景主色调（#背景取色 ②）：上传背景激活时，尘埃/歌词/主体光的调色总线改由此驱动，而非专辑封面。
+  // 与封面同一套取色算法（extractDominant→remapToMood），色调统一；解码失败/无源为 null（调用侧回落封面色）
+  private _mood: MoodPalette | null = null
 
   constructor() {
     this.mat = new THREE.MeshBasicNodeMaterial({ depthWrite: false })
@@ -79,6 +104,7 @@ export class UserBackdrop {
       this.tex?.dispose()
       this.tex = tex
       this.imgAspect = bitmap.width / Math.max(1, bitmap.height)
+      this._mood = extractMood(bitmap, bitmap.width, bitmap.height) // 背景取色（#背景取色 ②）
       this.rebuildColorNode(tex)
       this.fade = 0
       this.mesh.visible = true
@@ -127,6 +153,7 @@ export class UserBackdrop {
     this.video = video
     document.addEventListener('visibilitychange', this.onVisibility)
     this.imgAspect = video.videoWidth / Math.max(1, video.videoHeight)
+    this._mood = extractMood(video, video.videoWidth, video.videoHeight) // 背景取色（#背景取色 ②）：canplay 后首帧 drawImage 尽力取
     this.rebuildColorNode(tex)
     this.fade = 0
     this.mesh.visible = true
@@ -182,6 +209,12 @@ export class UserBackdrop {
     this.fade = Math.min(1, this.fade + dt / FADE_SEC)
     this.uSat.value = s.saturation
     this.uBright.value = backdropBrightness({ opacity: s.opacity, breathe: s.breathe, energy: s.energy, sleep: s.sleep, fade: this.fade })
+  }
+
+  /** 背景主色调（#背景取色 ②）：调用侧（index.ts applyBackgroundSource）读它驱动调色总线；
+   * null = 解码失败/无源，调用侧回落封面色 */
+  get mood(): MoodPalette | null {
+    return this._mood
   }
 
   /** 只读测试口（惯例同 sky.stateForTest） */

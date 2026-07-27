@@ -65,7 +65,6 @@ Audelyra 是独立项目，与 Apple、LRCLIB、网易云音乐及任何音乐�
 
 ## 致谢
 
-- 感谢开源项目 Mineradio 及其作者 XxHuberrr——本项目的产品灵感来源
 - 感谢 [LRCLIB](https://lrclib.net) 提供开放的歌词数据服务
 
 ## 许可
@@ -84,4 +83,4 @@ Built with Electron, three.js (WebGPU/TSL), meyda, WebCodecs, and a native Swift
 
 **Privacy**: audio capture and analysis never leave your machine. The only network requests are lyrics lookup and update checks — both anonymous and both can be turned off in settings.
 
-Licensed under [GPL-3.0](LICENSE) (with a GSAP linking exception). The "Audelyra" name and logo are not covered by the license — all rights reserved. Audelyra is an independent project, not affiliated with any music platform; see [NOTICE.md](NOTICE.md) for third-party attributions and disclaimers. Thanks to the open-source project Mineradio and its author XxHuberrr for the product inspiration.
+Licensed under [GPL-3.0](LICENSE) (with a GSAP linking exception). The "Audelyra" name and logo are not covered by the license — all rights reserved. Audelyra is an independent project, not affiliated with any music platform; see [NOTICE.md](NOTICE.md) for third-party attributions and disclaimers.

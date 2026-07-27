@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { applyCurve } from './curves'
+import { applyCurve, softLimit, SOFT_LIMIT_CAP } from './curves'
 
 describe('applyCurve', () => {
   it('linear 恒等', () => {
@@ -22,5 +22,21 @@ describe('applyCurve', () => {
   it('越界输入被夹', () => {
     expect(applyCurve('linear', -1)).toBeCloseTo(0)
     expect(applyCurve('linear', 2)).toBeCloseTo(1)
+  })
+})
+
+describe('softLimit', () => {
+  it('膝点以下恒等（默认手感不变）', () => {
+    expect(softLimit(0)).toBeCloseTo(0)
+    expect(softLimit(0.5)).toBeCloseTo(0.5)
+    expect(softLimit(0.9)).toBeCloseTo(0.9)
+  })
+  it('膝点以上单调递增（gain 全行程有增量，无饱和平台）', () => {
+    expect(softLimit(1.2)).toBeGreaterThan(softLimit(1))
+    expect(softLimit(1.6)).toBeGreaterThan(softLimit(1.2))
+  })
+  it('渐近封顶于 SOFT_LIMIT_CAP，负输入夹到 0', () => {
+    expect(softLimit(10)).toBeLessThanOrEqual(SOFT_LIMIT_CAP)
+    expect(softLimit(-1)).toBeCloseTo(0)
   })
 })

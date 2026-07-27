@@ -9,7 +9,7 @@ const HOVER_OPACITY = 0.6
 export interface InfoIcon {
   el: HTMLElement
   /** 摘除 tooltip 节点（attachTooltip 的 cleanup）+ 卸掉自挂的提亮监听——
-   * 面板重建（buildRows 前 drain）/ dispose 时调用，防 document.body 孤儿化 tooltip 节点 */
+   * 面板重建（buildRuleRows 前 drain）/ dispose 时调用，防 document.body 孤儿化 tooltip 节点 */
   dispose: () => void
 }
 

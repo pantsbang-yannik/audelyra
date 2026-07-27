@@ -117,3 +117,48 @@ describe('CoverController 失败分支', () => {
     expect(particles.uniforms.uColorA.value.r).not.toBeCloseTo(0.9, 2)
   })
 })
+
+describe('CoverController 调色源门控（#背景取色 ②）', () => {
+  const MOOD = {
+    primary: { r: 0.1, g: 0.8, b: 0.2 },
+    deep: { r: 0.05, g: 0.3, b: 0.1 },
+    highlight: { r: 0.6, g: 0.95, b: 0.7 },
+  }
+
+  it('门控开启：clear/换歌不再改调色总线（形状照常，颜色让给背景）', () => {
+    const { particles } = makeFakeParticles()
+    const c = new CoverController(particles, 100, { onSettled: () => {}, onCloudChanged: () => {} })
+    c.applyExternalMood(MOOD, null) // 背景色写入总线
+    c.update(10)
+    const r = particles.uniforms.uColorA.value.r
+    expect(r).toBeCloseTo(MOOD.primary.r, 2)
+
+    c.setColorSuppressed(true)
+    c.clear(null) // 背景接管期间的换歌：不得改色
+    c.update(10)
+    expect(particles.uniforms.uColorA.value.r).toBeCloseTo(MOOD.primary.r, 2) // 仍是背景色，未回默认
+  })
+
+  it('applyExternalMood 把背景色 tween 进总线（尘埃/歌词/主体光共用此三色）', () => {
+    const { particles } = makeFakeParticles()
+    const c = new CoverController(particles, 100, { onSettled: () => {}, onCloudChanged: () => {} })
+    c.applyExternalMood(MOOD, null)
+    c.update(10)
+    expect(particles.uniforms.uColorA.value.g).toBeCloseTo(MOOD.primary.g, 2)
+    expect(particles.uniforms.uColorB.value.g).toBeCloseTo(MOOD.deep.g, 2)
+    expect(particles.uniforms.uColorC.value.g).toBeCloseTo(MOOD.highlight.g, 2)
+  })
+
+  it('reapplyCoverColor：切回极光后颜色 tween 回当前封面色（无封面时=默认冷色，离开背景色）', () => {
+    const { particles } = makeFakeParticles()
+    const c = new CoverController(particles, 100, { onSettled: () => {}, onCloudChanged: () => {} })
+    c.applyExternalMood(MOOD, null) // 先染成背景绿
+    c.update(10)
+    expect(particles.uniforms.uColorA.value.g).toBeCloseTo(MOOD.primary.g, 2)
+
+    c.setColorSuppressed(false)
+    c.reapplyCoverColor(null) // 切回极光
+    c.update(10)
+    expect(particles.uniforms.uColorA.value.g).not.toBeCloseTo(MOOD.primary.g, 2) // 已离开背景绿
+  })
+})

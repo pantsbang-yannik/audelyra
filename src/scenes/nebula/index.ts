@@ -22,6 +22,7 @@ import { AudioVisualMapper } from './mapping/mapper'
 import { defaultRhythmPreset } from './mapping/spec'
 import type { MappingValues } from './mapping/types'
 import { resolveShape, planRefreshAction, shapeSelectionChanged, isBackfillReveal, type ResolvedKind, type ResolvedShape } from './shapes/resolve'
+import { isBodyConcealed } from './body-visibility-link'
 import { DEFAULT_SHAPE_SETTINGS, selectedCustomMeta, type ShapeSettings, type BodyKind } from './shapes/types'
 import type { ShapePointCloud } from './cover-points'
 import { NebulaMotionProgram } from './motion/nebula-program'
@@ -56,6 +57,17 @@ import { LaserSweep } from './linework/laser-sweep'
 import { EclipseBody } from './linework/eclipse-body'
 import { LedmatrixBody } from './linework/ledmatrix-body'
 import { LaserBody } from './linework/laser-body'
+import { perf } from '../../perf/collector'
+import type { GpuUnavailableReason } from '../../perf/gpu-timing'
+
+// GPU 计时可用性（性能基线）：init 后回读真实状态，供报告记录不可用原因——
+// 绝不静默填 0，取不到就要说清为什么取不到
+let gpuUnavailable: GpuUnavailableReason | null = null
+export const nebulaGpuUnavailableReason = (): GpuUnavailableReason | null => gpuUnavailable
+
+// 真实 resolve 在飞标志。必须与 accumulator 的 inFlight 分开：后者会被 reset() 解开，
+// 而 three 的 pendingResolve 不会——只靠 accumulator 判断会拿到跨 reset 边界的混合窗口数据
+let gpuResolveInFlight = false
 
 // 5 个打击位（球内均布、立体分散），SignalRig 返回的站位轮换命中
 const BEAT_SITES = [
@@ -74,7 +86,7 @@ const BASE_CAM = new THREE.Vector3(0, 0.2, 3.0) // 星云内部边缘「被包�
 const SHATTER_IMPULSE = 4.0 // 碎相冲量幅度
 const SNAP_DISSOLVE_SEC = 1.0 // 散相：morph 快速压 0
 const SNAP_GATHER_SEC = 0.2 // 聚相：morph 快速回 1（用户调参：聚合更果断 0.55→0.2）
-const MAP_THICKEN_SPAN = 0.35 // 映射厚度跨度：thickness=1 时粒径 ×1.35（手感，亲验调）
+const MAP_THICKEN_SPAN = 0.6 // 映射厚度跨度：thickness=1 时粒径 ×1.6（0.35→0.6：滑块全行程可感，亲验调）
 const LINE_RATE_SPAN = 1.5 // 映射速度→线条响应速率跨度：speed=1 时快 2.5×（手感，亲验调）
 const GATHER_DECAY_SEC = 1.1 // 聚合刚度+阻尼增益衰减时长。配合法则：≈ SNAP_GATHER_SEC + 刹车余量(~0.7s)——
 // 窗口必须罩住"到站后的刹车距离",调短到贴着聚合时长会让阻尼在粒子还带余速时撤掉→连环回弹(2026-07-10 亲验教训)
@@ -122,6 +134,9 @@ export function createNebulaScene(): Scene {
 
   // cameraSettings 是闭包变量，applyCamera 热更后下一帧生效（重放语义同 motion）
   let cameraSettings: CameraSettings = { ...DEFAULT_CAMERA_SETTINGS }
+  // 滚轮改默认距离的落盘通道（#镜头精修 ①）：main.ts 注入，防抖 400ms 提交，避免每格滚轮刷盘
+  let cameraCommit: ((c: CameraSettings) => void) | null = null
+  let cameraCommitTimer: ReturnType<typeof setTimeout> | null = null
 
   // 方言指挥：家族权重+逐家族驱动器；与 rig/motionProgram 同生命周期（构造/重建同步）
   let dialect: DialectConductor | null = null
@@ -197,10 +212,6 @@ export function createNebulaScene(): Scene {
   // 苏醒延迟决策：边沿帧能量包络还没爬起来，先用 M2 基线起步，观察窗口内取 max(energy) 后定稿
   const awakenDirector = new AwakeningDirector()
 
-  // fps 打点（≥55 是本任务真机验收线）
-  let frames = 0
-  let fpsWindowStart = 0
-
   /** 把仲裁结果落到粒子：目标缓冲 + 两枚封面标定 uniform + 记账 */
   function applyResolved(r: ResolvedShape): void {
     if (!particles) return
@@ -236,7 +247,12 @@ export function createNebulaScene(): Scene {
     const cur = backgroundSettings.current
     const myGen = ++bgSwitchGen
     if (cur === 'aurora') {
-      if (backdrop) { scene.remove(backdrop.mesh); backdrop.dispose(); backdrop = null }
+      if (backdrop) {
+        scene.remove(backdrop.mesh); backdrop.dispose(); backdrop = null
+        // 切回极光：解除调色总线的背景接管，颜色 tween 回当前封面色（#背景取色 ②）
+        cover?.reapplyCoverColor(lastBpm)
+      }
+      cover?.setColorSuppressed(false)
       if (!sky) buildSkyMirror()
       return
     }
@@ -247,8 +263,19 @@ export function createNebulaScene(): Scene {
       if (ok) {
         if (mirror) { scene.remove(mirror.group); mirror.dispose(); mirror = null }
         if (sky) { scene.remove(sky.mesh); sky.dispose(); sky = null }
+        // 背景取色接管调色总线（#背景取色 ②）：尘埃/歌词/主体光改随上传背景基调，而非专辑封面。
+        // 取色失败（如视频首帧未就绪）则回落封面色，别把总线冻在旧背景色
+        const mood = backdrop?.mood ?? null
+        if (mood) {
+          cover?.setColorSuppressed(true)
+          cover?.applyExternalMood(mood, lastBpm)
+        } else {
+          cover?.setColorSuppressed(false)
+          cover?.reapplyCoverColor(lastBpm)
+        }
       } else {
         if (backdrop) { scene.remove(backdrop.mesh); backdrop.dispose(); backdrop = null }
+        cover?.setColorSuppressed(false)
         if (!sky) buildSkyMirror()
       }
     })
@@ -371,7 +398,6 @@ export function createNebulaScene(): Scene {
       refreshShape() // 重新仲裁当前形状（appliedTarget 已标脏 → 必重传）
       morphTarget = 0 // live 循环按状态机重算 desiredMorph
       sleepTween.start(u.uSleep.value, (signals?.silence ?? true) ? 1 : 0, 2, easeDrift)
-      frames = 0; fpsWindowStart = 0 // 评审 P2：fps 打点窗口跨 galaxy 会产出假均值
       if (galaxyLastTrack) { const t = galaxyLastTrack; galaxyLastTrack = null; onTrackChangeImpl(t) } // 恢复封面/歌词/拼字现场
     }
   }
@@ -442,13 +468,23 @@ export function createNebulaScene(): Scene {
 
   return {
     async init(ctx) {
-      renderer = new THREE.WebGPURenderer({ canvas: ctx.canvas, antialias: false })
+      // trackTimestamp 必须构造期传入：three 的 Backend 从 parameters 读取，构造后赋值无效
+      renderer = new THREE.WebGPURenderer({
+        canvas: ctx.canvas, antialias: false, trackTimestamp: ctx.trackTimestamp === true,
+      })
       renderer.setSize(window.innerWidth, window.innerHeight)
       renderer.toneMapping = THREE.AgXToneMapping
       await renderer.init() // WebGPU 不可用时 renderer.backend 在此期间才会回落到 WebGLBackend，之前问都问不出真实 backend
       // ctx.quality（main.ts 传入 TIERS.high）只是上限参考；真正初档按探得的 backend 裁决（设计第 6 节：默认值不许拿最高档）
       const backend = renderer.backend.constructor.name === 'WebGPUBackend' ? 'webgpu' : 'webgl'
+      // GPU 计时可用性回读：backend 内部还会与设备 timestamp-query feature 求与，
+      // 传了 true 也可能被否——必须读回真实值而不是假定生效
+      if (ctx.trackTimestamp) {
+        const tracking = (renderer.backend as { trackTimestamp?: boolean }).trackTimestamp === true
+        gpuUnavailable = backend === 'webgl' ? 'webgl-backend' : tracking ? null : 'feature-unsupported'
+      }
       const quality = ctx.forcedTier ?? pickInitialTier(backend) // 手动档位优先；'auto' 走 backend 自动选档
+      perf.setActiveTier(quality.name, quality.particles) // 回填实际生效档位供 HUD/报告读真源
       renderer.setPixelRatio(Math.min(devicePixelRatio, quality.dprCap))
       console.log('[nebula] backend =', renderer.backend.constructor.name, 'tier =', quality.name, 'count =', quality.particles)
 
@@ -487,12 +523,22 @@ export function createNebulaScene(): Scene {
       bgCaps = { ...quality.background }
       buildSkyMirror()
       applyBackgroundSource() // 启动即用户背景时补建 backdrop（buildSkyMirror 对该源早退）
-      titleParticles = new TitleParticles(quality.name === 'low' ? 10_000 : 20_000)
+      titleParticles = new TitleParticles(quality.name === 'low' ? 16_000 : 32_000) // #光效精修③ 加密：笔画更实、可读性更强，additive 叠加下笔芯自然聚成亮白核
       scene.add(titleParticles.group)
-      lyricsParticles = new LyricsParticles(quality.name === 'low' ? 10_000 : 20_000)
+      lyricsParticles = new LyricsParticles(quality.name === 'low' ? 16_000 : 32_000) // #光效精修③ 加密：同 title，歌词笔画更实更易读
       scene.add(lyricsParticles.group)
       post = quality.bloom ? new NebulaPost(renderer, scene, camera, { bloom: true }) : null
       director = new CameraDirector(camera, ctx.canvas) // 导演层：段落机位/呼吸/drop冲击/手动接管，接管相机
+      // 滚轮改默认距离（#镜头精修 ①）：立即更新闭包 cameraSettings（下一帧 setDistScale 即用新值，粘住不飘回），
+      // 再防抖落盘 + 广播——落盘回流 applyCamera 会用同值整包覆盖 cameraSettings，与调音台距离滑块联动
+      director.setOnDistScaleChange((v) => {
+        cameraSettings = { ...cameraSettings, distScale: v }
+        if (cameraCommitTimer) clearTimeout(cameraCommitTimer)
+        cameraCommitTimer = setTimeout(() => {
+          cameraCommitTimer = null
+          cameraCommit?.(cameraSettings)
+        }, 400)
+      })
 
       // 开机即沉睡幕布、morph 归零。tween 起手持有当前值，等状态边沿再真正过渡。
       particles.uniforms.uSleep.value = 1
@@ -558,19 +604,28 @@ export function createNebulaScene(): Scene {
         pendingParticleRebuild = false
       }
 
+      // 分段打点（性能基线）：probing 是热路径唯一读的布尔，off 态零开销
+      const probing = perf.enabled
+      const mark = (k: 'signal' | 'mapping' | 'state' | 'visual' | 'camera' | 'submit', t0: number): void => {
+        if (probing) perf.markPhase(k, performance.now() - t0)
+      }
+
       const u = particles.uniforms
       lastBpm = signals?.bpm ?? null
 
       // 1) SignalRig 一次性覆写其名下 uniform，并返回本拍站位
+      const tSignal = probing ? performance.now() : 0
       const site = rig.update(dt, signals)
       if (site >= 0) {
         // 打击位是为 3D 星云选的立体站位；封面态把 z 压向封面平面（uTargetPlanar=1 时随 uMorph 投影）；几何形状 planar=0 不压平（B1 T4 门控）
         const s = BEAT_SITES[site]
         u.uBeatCenter.value.set(s.x, s.y, s.z * (1 - u.uMorph.value * u.uTargetPlanar.value))
       }
+      mark('signal', tSignal)
 
       // 1.5) 全场弹性脉冲（Task 7）：mapper 纯逻辑算 space/brightness → additive uniform，
       // 不碰 SignalRig 名下的 14 个 uniform（其每帧无条件覆写，见文件头分工纪律）
+      const tMapping = probing ? performance.now() : 0
       const controls = mapper.update(signals, mapping, dt)
       u.uPulseSpace.value = controls.space
       u.uPulseBright.value = controls.brightness * climaxScale(motionSettings.climaxBrightness) // #高潮亮度：全场脉冲提亮压档
@@ -599,9 +654,11 @@ export function createNebulaScene(): Scene {
         gatherSec = GATHER_DECAY_SEC
       }
       prevDrop = u.uDrop.value
+      mark('mapping', tMapping)
 
       // 2) 状态机。silence 被切形状宽限期覆写为 false（spec §4.6：唤醒预览）；
       //    宽限只影响状态机睡/醒判定，不碰 pendingParticleRebuild 等其它 silence 消费点
+      const tState = probing ? performance.now() : 0
       wakeGraceSec = Math.max(0, wakeGraceSec - dt)
       const state = sm.update(dt, { silence: (signals?.silence ?? true) && wakeGraceSec <= 0, hasTarget })
 
@@ -670,10 +727,10 @@ export function createNebulaScene(): Scene {
       bodyXfade.update(dt, activeSlot, BODY_FADE_SEC)
       const particleFade = bodyXfade.fadeOf('particles')
       u.uBodyDim.value = particleFade
-      // 用户背景已上屏（sky 被互斥拆除）→ 五路主体隐匿；v2：bgShowBodies 开关可把主体请回来
-      // （配合透明度压暗后主体叠图可读，用户拍板）。判据仍看 sky 实体（⑤修纪律：加载中不隐、失败自愈）
+      // 显示主体（二期通用化）：主体 tab 顶部总开关，任何背景下都生效；选中自定义背景时联动关闭，
+      // 用户可随时再打开。判据委托 isBodyConcealed（防黑屏自愈纪律：自定义背景加载中/失败时不隐主体）
       // 星系模式不受影响——入场段已强制 particles.mesh.visible=true，且星系期本段不执行
-      const bodyConcealed = !sky && !backgroundSettings.bgShowBodies
+      const bodyConcealed = isBodyConcealed(shapeSettings.showBody, backgroundSettings.current, !!sky)
       particles.mesh.visible = !bodyConcealed && particleFade > 0.01
       const lineRate = 1 + LINE_RATE_SPAN * controls.speed
       // 线条系共用帧输入：节拍事件喂纯逻辑模块，其余喂画板 uniform
@@ -702,7 +759,7 @@ export function createNebulaScene(): Scene {
         if (lineFade > 0.01) {
           linework.update(dt, {
             bins: spectrumBins.values, opacity: lineFade,
-            barHeight: motionSettings.lineBarHeight, ...sharedInp,
+            barHeight: motionSettings.lineBarHeight, waveWidth: motionSettings.waveWidth, ...sharedInp,
           })
           linework.faceCamera(camera.position, dt)
         }
@@ -739,6 +796,7 @@ export function createNebulaScene(): Scene {
             waveRadii: ledWaves.radii, waveAmps: ledWaves.amps, opacity: fade,
             strobeOn: motionSettings.strobeEnabled, ...sharedInp,
             density: motionSettings.ledDensity, cross: motionSettings.ledCross,
+            waveThick: motionSettings.ledWaveThick, waveBright: motionSettings.ledWaveBright,
           })
           ledmatrix.faceCamera(camera.position, dt)
         }
@@ -757,8 +815,10 @@ export function createNebulaScene(): Scene {
           laser.faceCamera(camera.position, dt)
         }
       }
+      mark('state', tState)
 
       // 5) 调色过渡 + 背景三件套（天空/尘埃/镜面）——palette 同源（uColorA=primary uColorB=deep）
+      const tVisual = probing ? performance.now() : 0
       cover.update(dt)
       const flowMul = rig.narrative.phase === 'burst' ? 1.6 : 1 // 副歌天空流速加快（spec §四层①）
       sky?.update(dt, {
@@ -861,8 +921,10 @@ export function createNebulaScene(): Scene {
       lyricsParticles?.setPalette(u.uColorA.value, u.uColorC.value)
       lyricsParticles?.setFrame(Math.min(1, lf.spread + lr.spreadAdd), lf.fade, lf.mix, 1 - u.uSleep.value)
       lyricsParticles?.faceCamera(camera.position, dt)
+      mark('visual', tVisual)
 
       // 6) 导演层运镜：段落机位（GSAP）→ 呼吸推拉 → drop 冲击/微震 → 手持漂移 → 手动接管
+      const tCamera = probing ? performance.now() : 0
       time += dt
       // calm 系数改吃 rig 平滑后的 uEnergy（与粒子/背景常驻动效同源）——rig.update 已在本帧
       // step 1 跑过，u.uEnergy.value 是当帧新值，director.update 之前设置不产生一帧延迟（T5 复审）
@@ -873,8 +935,10 @@ export function createNebulaScene(): Scene {
       director?.update(dt, signals, u.uDrop.value)
       // 运镜推拉后取最新距离：焦平面恒锚在原点主体（"封面永远锐利，前后景化雾"）
       u.uFocusDist.value = camera.position.length()
+      mark('camera', tCamera)
 
       // 7) 推进 GPU 仿真并渲染
+      const tSubmit = probing ? performance.now() : 0
       u.uDt.value = dt
       u.uTime.value = time
       particles.compute(renderer)
@@ -889,39 +953,57 @@ export function createNebulaScene(): Scene {
       } else {
         renderer.render(scene, camera)
       }
+      mark('submit', tSubmit)
 
-      frames++
-      const now = performance.now()
-      if (fpsWindowStart === 0) fpsWindowStart = now
-      if (now - fpsWindowStart > 5000) {
-        console.log(`[nebula] avg fps ≈ ${(frames / ((now - fpsWindowStart) / 1000)).toFixed(1)}`)
-        frames = 0
-        fpsWindowStart = now
+      // GPU 批次采样（性能基线）：resolveTimestampsAsync 返回的是「上次清空到本次清空之间
+      // 全部 pass 的时长总和」而非单帧值，且回读跨帧——所以严格 single-flight，
+      // 由 GpuTimingAccumulator 记账每批覆盖帧数后摊成均值。render/compute 分属两个 pool，两边都要取。
+      if (perf.trackGpu && gpuUnavailable === null && !gpuResolveInFlight && perf.gpu.canStartBatch()) {
+        // 两道锁缺一不可：
+        // ① gpuResolveInFlight（本地）——挡住 three 自身的 pendingResolve 复用。reset() 会解开
+        //    accumulator 的 inFlight，但真实 GPU resolve 可能仍未完成；此时若发起新批，three 会
+        //    把「同一个」pending Promise 交回来，新 epoch 拿到的是跨越 reset 边界的旧窗口时长——
+        //    epoch 对得上，数据却是混的。本地标志不受 reset 影响，堵的正是这个洞。
+        // ② epoch（accumulator）——挡住跨 reset 落地的陈旧回调污染新场景样本。
+        gpuResolveInFlight = true
+        const epoch = perf.gpu.beginBatch()
+        const r = renderer
+        void Promise.all([r.resolveTimestampsAsync('render'), r.resolveTimestampsAsync('compute')])
+          .then(([renderMs, computeMs]) => {
+            const total = (renderMs ?? 0) + (computeMs ?? 0)
+            perf.gpu.endBatch(epoch, total > 0 ? total : null)
+          })
+          .catch(() => perf.gpu.endBatch(epoch, null))
+          .finally(() => { gpuResolveInFlight = false })
       }
 
       // 8) 性能降级监督：滑窗均值持续低于目标 85% 时按序动作，DPR→后期→涟漪→粒子→floor
       // （亲验 fb1 修订①：倒影退役后序列缩至 5 级，dropBgRipple 吸收了原 dropBgReflection 的近尘职责）
-      const action = governor.push(dt)
-      if (action !== 'keep') {
-        console.log('[quality]', action)
-        if (action === 'lowerDpr') {
-          renderer.setPixelRatio(Math.max(0.75, renderer.getPixelRatio() * 0.75))
-        } else if (action === 'disablePost') {
-          post?.dispose()
-          post = null
-        } else if (action === 'dropBgRipple') {
-          // 背景先于主粒子被牺牲：涟漪关+极光简化+近尘关一次性归档（涟漪最后的「活」感也让位于粒子这个核心资产）。
-          // low 档 caps 本就是 simple+ripple:false+nearDust:false：无变化时跳过重建，免得最挣扎的机器白吃一次 shader 重编译（终审 I1）
-          const bgRippleChanged = bgCaps.ripple || bgCaps.auroraDetail !== 'simple'
-          bgCaps = { ...bgCaps, ripple: false, auroraDetail: 'simple', nearDust: false }
-          background?.setNearDust(false)
-          if (bgRippleChanged) buildSkyMirror() // 极光降 simple 需换着色器：成对重建（一次性卡顿发生在本就掉帧的时刻，同 disablePost 先例）
-        } else if (action === 'lowerParticles') {
-          pendingParticleRebuild = true
-        } else if (action === 'floor') {
-          if (!floorWarned) {
-            console.warn('[quality] floor：已到最低档，不再继续降级')
-            floorWarned = true
+      // bench 期间必须停摆（spec §8.4）：forcedTier 只锁初始档，管不到运行时降级——
+      // 若不停，低配机跑分触发降级会让同一场景样本混两种配置，测的是「降级后的性能」
+      if (perf.mode !== 'bench') {
+        const action = governor.push(dt)
+        if (action !== 'keep') {
+          console.log('[quality]', action)
+          if (action === 'lowerDpr') {
+            renderer.setPixelRatio(Math.max(0.75, renderer.getPixelRatio() * 0.75))
+          } else if (action === 'disablePost') {
+            post?.dispose()
+            post = null
+          } else if (action === 'dropBgRipple') {
+            // 背景先于主粒子被牺牲：涟漪关+极光简化+近尘关一次性归档（涟漪最后的「活」感也让位于粒子这个核心资产）。
+            // low 档 caps 本就是 simple+ripple:false+nearDust:false：无变化时跳过重建，免得最挣扎的机器白吃一次 shader 重编译（终审 I1）
+            const bgRippleChanged = bgCaps.ripple || bgCaps.auroraDetail !== 'simple'
+            bgCaps = { ...bgCaps, ripple: false, auroraDetail: 'simple', nearDust: false }
+            background?.setNearDust(false)
+            if (bgRippleChanged) buildSkyMirror() // 极光降 simple 需换着色器：成对重建（一次性卡顿发生在本就掉帧的时刻，同 disablePost 先例）
+          } else if (action === 'lowerParticles') {
+            pendingParticleRebuild = true
+          } else if (action === 'floor') {
+            if (!floorWarned) {
+              console.warn('[quality] floor：已到最低档，不再继续降级')
+              floorWarned = true
+            }
           }
         }
       }
@@ -1001,6 +1083,9 @@ export function createNebulaScene(): Scene {
     applyCamera(c: CameraSettings): void {
       cameraSettings = c
     },
+    setCameraCommit(cb: (c: CameraSettings) => void): void {
+      cameraCommit = cb // #镜头精修 ①：滚轮改默认距离的落盘出口
+    },
     applyTitle(t: TitleSettings): void {
       titleSettings = t
     },
@@ -1049,6 +1134,7 @@ export function createNebulaScene(): Scene {
     },
 
     dispose() {
+      if (cameraCommitTimer) { clearTimeout(cameraCommitTimer); cameraCommitTimer = null }
       director?.dispose()
       director = null
       post?.dispose()

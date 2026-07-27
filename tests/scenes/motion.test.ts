@@ -55,6 +55,14 @@ describe('Spring', () => {
     expect(overshot).toBe(true)
     expect(s.value).toBeCloseTo(1, 1)
   })
+  it('低帧率不数值发散：12Hz 弱阻尼弹簧在 30fps 喂冲量后输出有界（大 dt 子步积分兜底）', () => {
+    const s = new Spring(12, 0.35) // mapper 平滑滑块最小档=12Hz（springFreqFromSmoothing 上限）
+    const dt = 1 / 30              // host 允许 dt 到 0.1；低配机 30fps 常态
+    s.update(1, dt)               // 冲量帧
+    let maxAbs = 0
+    for (let i = 0; i < 120; i++) maxAbs = Math.max(maxAbs, Math.abs(s.update(0, dt)))
+    expect(maxAbs).toBeLessThan(2) // 旧显式欧拉 w·dt=2.5>2 会指数爆到 100+
+  })
 })
 
 describe('Tween', () => {

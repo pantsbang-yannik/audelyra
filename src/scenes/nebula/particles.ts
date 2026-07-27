@@ -33,7 +33,7 @@ export interface NebulaUniforms {
   uColorC: { value: THREE.Color } // highlight
   uUiDim: { value: number } // UI 退台调光：1=舞台全亮，UI 前置时收到 ~0.55
   uUiDefocus: { value: number } // UI 退台整体退焦：抬高 CoC 下限，星云成为 UI 的失焦远景层
-  uPulseSpace: { value: number } // 全场弹性脉冲（Task 7，AudioVisualMapper 驱动）：膨胀/pop 分量 0..~1.2（含过冲）
+  uPulseSpace: { value: number } // 全场弹性脉冲（Task 7，AudioVisualMapper 驱动）：膨胀/pop 分量 0..~1.5（软限幅 CAP 1.25 + 弹簧过冲）
   uPulseBright: { value: number } // 全场弹性脉冲：提亮分量
   uThicken: { value: number } // 映射厚度（调音台规范化）：低频重量→粒径饱满乘子，1=中性（index 1.5 段每帧写入）
   uTargetHasColor: { value: number } // 1=目标点云自带颜色（封面像素）；0=无色几何形状，morph=1 仍走情绪三色（spec §4.2）
@@ -358,7 +358,7 @@ export class NebulaParticles {
       const settled = smoothstep(SETTLE.near, SETTLE.far, settleDist).oneMinus().mul(uMorph)
       vel.mulAssign(float(1).sub(uDt.mul(mix(float(1.2), float(4), uSleep)
         .add(uGather.mul(GATHER_DAMP_BOOST)).add(settled.mul(SETTLE.damp)))))
-      const bound = mix(float(1.6), float(2.7), uEnergy).add(uPulseSpace.mul(0.6)).sub(uBuildSqueeze.mul(0.5)) // 蓄力时舞台同步收拢（吸气）
+      const bound = mix(float(1.6), float(2.7), uEnergy).add(uPulseSpace.mul(0.85)).sub(uBuildSqueeze.mul(0.5)) // 蓄力时舞台同步收拢（吸气）；0.6→0.85：滑块全行程可感
       const dist = length(pos)
       If(dist.greaterThan(bound), () => {
         vel.addAssign(pos.div(dist).negate().mul(dist.sub(bound)).mul(uDt).mul(3))
@@ -390,7 +390,7 @@ export class NebulaParticles {
     const kickDirDrum = mix(kickDir, lockDirMat, lockWMat)
     mat.positionNode = simPos
       .add(kickDirDrum.mul(uKickEnv).mul(kickFall).mul(kickAmp).mul(uPointBeat))
-      .add(vec3(0, 0, 1).mul(uPulseSpace).mul(0.25)) // 全场弹性脉冲朝相机 pop（无距离衰减，Task 7）
+      .add(vec3(0, 0, 1).mul(uPulseSpace).mul(0.4)) // 全场弹性脉冲朝相机 pop（无距离衰减，Task 7）；0.25→0.4：滑块全行程可感
 
     const speed = length(velocities.element(instanceIndex))
     // 速度拉伸：把速度变换到视空间取屏幕平面分量，sprite 沿该方向旋转+拉长
@@ -447,12 +447,23 @@ export class NebulaParticles {
     // 4.6 律动重定义（用户已拍板）：禁「廉价爆闪级」整体脉冲；允许低幅度、锁 BPM、
     // 弹性过冲呼吸的「点头级」整体脉动（uPulseSpace/uPulseBright，见 mapping 层）。
     const glowFall = smoothstep(0.0, 1.6, positions.element(instanceIndex).sub(uBeatCenter).length()).oneMinus()
-    const lit = mix(albedo, uColorC, saturate(smoothstep(0.5, 2.0, speed).mul(0.6) // 高速粒子偏 highlight（冲量重做后整体速度上移，阈值同步上调防泛白）
+    // 变亮总权重（原内联在 mix 里，现提出来驱动「色温层次」两段过渡）
+    const glowT = saturate(smoothstep(0.5, 2.0, speed).mul(0.6) // 高速粒子发光（冲量重做后整体速度上移，阈值同步上调防泛白）
       .add(uBeatGlow.mul(0.55).mul(glowFall).mul(uPointBeat)) // 鼓点亮度模式（局部；M2 反馈上调 0.4→0.55）
-      .add(uPulseBright.mul(0.18)) // 全场脉冲提亮，低幅、无距离衰减（4.6 重定义，Task 7）
+      .add(uPulseBright.mul(0.3)) // 全场脉冲提亮，无距离衰减（4.6 重定义，Task 7）；0.18→0.3：滑块可感下限，仍守「点头级」不爆闪
       .add(twinkle.mul(0.5)) // T12a 高频碎光闪烁
       .add(crystalEdgePulse.mul(0.5)) // 晶体棱光脉冲
-      .add(crystalCore.mul(0.45)))) // 晶体内核打拍；saturate 钳总权重防叠加外插爆白
+      .add(crystalCore.mul(0.45))) // 晶体内核打拍；saturate 钳总权重防叠加外插爆白
+    // 色温层次（#光效精修 ③·三版，用户参考图：核心白 → 外缘饱和色）：
+    // 病根——原来 lit 一变亮就 mix 到 uColorC（highlight 在 remapToMood 里特意低饱和≈白），
+    // 于是「越亮越灰白」= 廉价发光。改为两段色温，复刻参考图「白核 + 饱和晕」的规律：
+    //   ① 发光腰部 → 染上饱和主色调 uColorA（primary，随②调色总线：暖歌暖、冷歌冷）
+    //   ② 只有最亮核心（glowT 后段）→ 才过渡到近白 uColorC，形成刺破的白核
+    const lit = mix(
+      mix(albedo, uColorA, glowT),        // 腰部：饱和主色调（保 albedo 起点，morph 时封面色仍在）
+      uColorC,                            // 核心：近白高光
+      smoothstep(0.72, 1.0, glowT)        // 仅最强发光（glowT>0.72）才趋白，其余保持饱和色
+    )
     // 深度调暗：远粒子沉入暗部（纵深线索，也是"黑是奢侈品"的落地之一）
     const depthDim = smoothstep(1.0, 4.5, positionView.z.negate()).oneMinus().mul(0.75).add(0.25)
     // 封面亮度补偿：morph 聚拢时粒子挤进薄板不补偿会加色过曝奔白（0.35 起调）；
@@ -468,8 +479,18 @@ export class NebulaParticles {
       .mul(energyDim)
       .mul(uNarrDim) // 叙事三幕：蓄力变暗/尾音回落（MotionProgram 驱动，默认 1 无副作用）
       .mul(mix(float(1.0), float(0.12).add(breath.mul(0.08)), uSleep))
+    // 节奏闪光收敛为「带当前色调的辉光」（#光效精修 ③，用户拍板：震动为主、光收成辉光、跟背景基调）：
+    // 旧写法 ×(1+uFlash·1.2) 是全屏乘白——暗背景粒子也被整体拔亮 → 刺眼且糊住画面。改为两段：
+    //  1) flashFlat：平铺提亮从 1.2 收到 0.3，仅留极轻的整体呼吸，不再爆白；
+    //  2) flashGlow：只给「本就偏亮」的粒子（baseCol 权重，暗粒子≈0）叠一记 highlight 色加光——
+    //     唯有亮核越过 bloom 阈值(0.75)被晕开成辉光；且 uColorC 随封面/上传背景走（②），
+    //     于是暖背景→暖光晕，而非刺眼纯白。背景主体亮度稳定、只有光核在节奏上「呼吸晕开」。
+    const baseCol = lit.mul(depthDim).mul(intensity).mul(uUiDim)
+    const flashFlat = float(1).add(uFlash.mul(0.3))
+    // 增益 1.1→0.8（#光效精修 ③·二版）：少往 bloom 灌能量，配合收紧的 bloom 让亮核保色不奔白、不糊
+    const flashGlow = baseCol.mul(uColorC).mul(uFlash).mul(0.8)
     // vec3() 包裹保证落进 colorNode 的类型联合（避免 color/vec3 运算结果推断不入并）
-    mat.colorNode = vec3(lit.mul(depthDim).mul(intensity).mul(uUiDim).mul(float(1).add(uFlash.mul(1.2))))
+    mat.colorNode = vec3(baseCol.mul(flashFlat).add(flashGlow))
 
     this.geometry = new THREE.PlaneGeometry(1, 1)
     this.material = mat

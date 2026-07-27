@@ -2,13 +2,12 @@ import { describe, it, expect } from 'vitest'
 import { SHAPES, shapeById, generateShape } from '../../src/scenes/nebula/shapes'
 import { SHAPE_IDS, sanitizeShapeSettings, DEFAULT_SHAPE_SETTINGS, selectedCustomMeta, CUSTOM_SHAPES_MAX } from '../../src/scenes/nebula/shapes/types'
 import { loadContourAssets, contourCloud } from '../../src/scenes/nebula/shapes/contour'
-import { generateCrystal } from '../../src/scenes/nebula/shapes/crystal'
 
 describe('形状注册表', () => {
-  it('注册表 = 卡片序（statue 退役后阵容9卡：星云/星球/晶体/心脏/频谱环/波形线/日食/点阵/激光）；序幕形体 demoOnly 不进卡片列', () => {
+  it('注册表 = 卡片序（statue/星球/晶体 退役后阵容7卡：星云/心脏/频谱环/波形线/日食/点阵/激光）；序幕形体 demoOnly 不进卡片列', () => {
     const cards = SHAPES.filter((s) => !s.demoOnly)
-    expect(cards.map((s) => s.id)).toEqual(['nebula', 'sphere', 'crystal', 'heart', 'spectrum', 'waveform', 'eclipse', 'ledmatrix', 'laser'])
-    expect(cards.map((s) => s.label)).toEqual(['星云', '星球', '晶体', '心脏', '频谱环', '波形线', '日食', '点阵', '激光'])
+    expect(cards.map((s) => s.id)).toEqual(['nebula', 'heart', 'spectrum', 'waveform', 'eclipse', 'ledmatrix', 'laser'])
+    expect(cards.map((s) => s.label)).toEqual(['星云', '心脏', '频谱环', '波形线', '日食', '点阵', '激光'])
     // 序幕四形体（发布准备③）：全部 demoOnly + contour 方言；不可持久化（SHAPE_IDS 白名单外）
     const demos = SHAPES.filter((s) => s.demoOnly)
     expect(demos.map((s) => s.id)).toEqual(['demo-gramophone', 'demo-cassette', 'demo-headphones', 'demo-mic'])
@@ -30,7 +29,7 @@ describe('形状注册表', () => {
     expect(shapeById('waveform').body).toBe('waveform')
     expect(shapeById('spectrum').generate).toBeNull()
     expect(shapeById('waveform').generate).toBeNull()
-    expect(shapeById('sphere').body).toBeUndefined() // 缺省=粒子，不强制补字段
+    expect(shapeById('heart').body).toBeUndefined() // 缺省=粒子，不强制补字段
     expect(generateShape('spectrum', 100)).toBeNull()
   })
   it('图形三连（日食/点阵/激光）：generate=null、body 传导、身份即形状', () => {
@@ -42,80 +41,40 @@ describe('形状注册表', () => {
   })
 })
 
-describe('生成器几何断言', () => {
-  const N = 3000
-  it('星球：点数正确、只产 positions、半径贴 1.15±0.05 薄壳', () => {
-    const c = generateShape('sphere', N)!
-    expect(c.positions.length).toBe(N * 3)
-    expect(c.colors).toBeUndefined()
-    for (let i = 0; i < N; i++) {
-      const r = Math.hypot(c.positions[i * 3], c.positions[i * 3 + 1], c.positions[i * 3 + 2])
-      expect(r).toBeGreaterThan(1.05)
-      expect(r).toBeLessThan(1.25)
-    }
-  })
-  it('晶体：双群体——内核实心球(r≤0.4) + 棱边薄壳带[1.0,1.23]，内核占比 0.2±0.06，无中间飞点', () => {
-    const c = generateShape('crystal', N)!
-    expect(c.positions.length).toBe(N * 3)
-    expect(c.colors).toBeUndefined()
-    let core = 0
-    for (let i = 0; i < N; i++) {
-      const r = Math.hypot(c.positions[i * 3], c.positions[i * 3 + 1], c.positions[i * 3 + 2])
-      if (r <= 0.4) core++
-      else {
-        expect(r).toBeGreaterThan(1.0) // 棱带下界：细分棱中点 0.962×1.15≈1.106，抖动最坏径向 0.069 仍 >1.03
-        expect(r).toBeLessThan(1.23)   // 上界：顶点 1.15 + 三轴抖动最坏径向 0.069 ≈ 1.219
-      }
-    }
-    expect(core / N).toBeGreaterThan(0.14)
-    expect(core / N).toBeLessThan(0.26)
-  })
-  it('晶体 aux（方言批2）：棱上粒子 xyz=单位棱方向/w=沿棱相位∈[0,1]，内核粒子全 0，两类都存在', () => {
-    const c = generateCrystal(2000)
-    expect(c.aux).toBeDefined()
-    expect(c.aux!.length).toBe(2000 * 4)
-    let edgeN = 0
-    let coreN = 0
-    for (let i = 0; i < 2000; i++) {
-      const [x, y, z, w] = [c.aux![i * 4], c.aux![i * 4 + 1], c.aux![i * 4 + 2], c.aux![i * 4 + 3]]
-      const len = Math.hypot(x, y, z)
-      if (len === 0) {
-        coreN++
-        expect(w).toBe(0)
-      } else {
-        edgeN++
-        expect(len).toBeCloseTo(1, 5) // 单位方向
-        expect(w).toBeGreaterThanOrEqual(0)
-        expect(w).toBeLessThanOrEqual(1)
-      }
-    }
-    expect(edgeN).toBeGreaterThan(1000) // ~80% 棱上
-    expect(coreN).toBeGreaterThan(200) // ~20% 内核
-  })
-  it('确定性 + (id,count) 记忆化：同参再调是同一引用，异 count 是新数组', () => {
-    const a = generateShape('sphere', 64)!
-    const b = generateShape('sphere', 64)!
-    const c = generateShape('sphere', 32)!
-    expect(b).toBe(a)
-    expect(c).not.toBe(a)
-    expect(c.positions.length).toBe(32 * 3)
-  })
-})
-
 describe('sanitizeShapeSettings', () => {
   it('坏枚举/缺字段/非对象 → 回默认 {nebula, coverPriority:true}（= 现状行为）', () => {
     expect(sanitizeShapeSettings(undefined)).toEqual(DEFAULT_SHAPE_SETTINGS)
     expect(sanitizeShapeSettings({ current: 'donut', coverPriority: 'yes' })).toEqual(DEFAULT_SHAPE_SETTINGS)
   })
   it('合法值原样保留；SHAPE_IDS 为白名单', () => {
-    expect(sanitizeShapeSettings({ current: 'sphere', coverPriority: false })).toEqual({ current: 'sphere', customCurrent: null, customShapes: [], coverPriority: false })
-    expect(SHAPE_IDS).toEqual(['nebula', 'sphere', 'crystal', 'heart', 'spectrum', 'waveform', 'eclipse', 'ledmatrix', 'laser'])
+    expect(sanitizeShapeSettings({ current: 'heart', coverPriority: false })).toEqual({ current: 'heart', customCurrent: null, customShapes: [], coverPriority: false, showBody: true })
+    expect(SHAPE_IDS).toEqual(['nebula', 'heart', 'spectrum', 'waveform', 'eclipse', 'ledmatrix', 'laser'])
+  })
+  it('退役形状 sphere/crystal（用户拍板删卡）→ 旧存档打回星云', () => {
+    expect(sanitizeShapeSettings({ current: 'sphere', coverPriority: false }).current).toBe('nebula')
+    expect(sanitizeShapeSettings({ current: 'crystal', coverPriority: true }).current).toBe('nebula')
   })
   it('S1 迁移：老落盘值 wave/ring/halo 不再合法 → 回默认星云（coverPriority 保留）', () => {
-    expect(sanitizeShapeSettings({ current: 'wave', coverPriority: false })).toEqual({ current: 'nebula', customCurrent: null, customShapes: [], coverPriority: false })
-    expect(sanitizeShapeSettings({ current: 'ring', coverPriority: true })).toEqual({ current: 'nebula', customCurrent: null, customShapes: [], coverPriority: true })
+    expect(sanitizeShapeSettings({ current: 'wave', coverPriority: false })).toEqual({ current: 'nebula', customCurrent: null, customShapes: [], coverPriority: false, showBody: true })
+    expect(sanitizeShapeSettings({ current: 'ring', coverPriority: true })).toEqual({ current: 'nebula', customCurrent: null, customShapes: [], coverPriority: true, showBody: true })
     expect(sanitizeShapeSettings({ current: 'galaxy', coverPriority: true }).current).toBe('nebula')
     expect(sanitizeShapeSettings({ current: 'halo', coverPriority: true }).current).toBe('nebula')
+  })
+})
+
+describe('ShapeSettings：显示主体 showBody', () => {
+  it('默认显示主体（true）', () => {
+    expect(DEFAULT_SHAPE_SETTINGS.showBody).toBe(true)
+    expect(sanitizeShapeSettings({}).showBody).toBe(true)
+  })
+
+  it('非布尔回退默认', () => {
+    expect(sanitizeShapeSettings({ showBody: 'yes' }).showBody).toBe(true)
+    expect(sanitizeShapeSettings({ showBody: 0 }).showBody).toBe(true)
+  })
+
+  it('合法布尔原样采用', () => {
+    expect(sanitizeShapeSettings({ showBody: false }).showBody).toBe(false)
   })
 })
 
@@ -123,7 +82,7 @@ describe('sanitizeShapeSettings · 自定义形状（idea #12）', () => {
   const uid = (n: number): string => `${String(n).padStart(8, '0')}-0000-4000-8000-000000000000`
 
   it('旧设置文件（无 custom 字段）→ 空收藏 + 无选中', () => {
-    const s = sanitizeShapeSettings({ current: 'sphere', coverPriority: false })
+    const s = sanitizeShapeSettings({ current: 'nebula', coverPriority: false })
     expect(s.customShapes).toEqual([])
     expect(s.customCurrent).toBeNull()
   })
