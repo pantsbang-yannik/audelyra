@@ -1,8 +1,8 @@
 {
-  "version": "0.1.1",
+  "version": "0.1.2",
   "minVersion": "0.1.0",
-  "publishedAt": "2026-07-23",
-  "notes": "星尘更疏朗、歌词更易读、线条不抢光",
-  "downloadUrl": "https://github.com/pantsbang-yannik/audelyra/releases/download/v0.1.1/Audelyra-0.1.1-arm64.dmg",
+  "publishedAt": "2026-07-27",
+  "notes": "调音台大升级：三个宏旋钮+四档风格，拧一下就出感觉",
+  "downloadUrl": "https://github.com/pantsbang-yannik/audelyra/releases/download/v0.1.2/Audelyra-0.1.2-arm64.dmg",
   "mirrorUrl": null
 }
