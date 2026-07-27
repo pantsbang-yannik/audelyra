@@ -1,8 +1,8 @@
 {
-  "version": "0.1.2",
+  "version": "0.1.3",
   "minVersion": "0.1.0",
   "publishedAt": "2026-07-27",
-  "notes": "调音台大升级：三个宏旋钮+四档风格，拧一下就出感觉",
-  "downloadUrl": "https://github.com/pantsbang-yannik/audelyra/releases/download/v0.1.2/Audelyra-0.1.2-arm64.dmg",
+  "notes": "Apple 公证落地双击即开；律动页新增撤销/重做",
+  "downloadUrl": "https://github.com/pantsbang-yannik/audelyra/releases/download/v0.1.3/Audelyra-0.1.3-arm64.dmg",
   "mirrorUrl": null
 }
