@@ -3,7 +3,6 @@
 appId: com.audelyra.app
 productName: Audelyra
 afterPack: scripts/strip-sourcemaps.cjs
-afterSign: scripts/adhoc-sign.cjs
 directories:
   output: dist
   buildResources: build
@@ -27,6 +26,18 @@ mac:
       arch: [arm64]
   category: public.app-category.music
   minimumSystemVersion: '14.2'
+  # 正式签名 + 公证（2026-07-27 证书到位，替代旧 adhoc-sign 钩子）。
+  # 凭据走钥匙串 profile「audelyra-notary」，见 package.json dist 脚本注入的环境变量。
+  hardenedRuntime: true
+  entitlements: build/entitlements.mac.plist
+  entitlementsInherit: build/entitlements.mac.inherit.plist
+  notarize: true
+  # extraResources 里的 Mach-O 不在 electron-builder 默认签名遍历范围，须显式列出，
+  # 漏签任何一个公证即被拒（media-control 主入口是 perl 脚本，无需签名）
+  binaries:
+    - Contents/Resources/audelyra-tap
+    - Contents/Resources/media-control/Frameworks/MediaRemoteAdapter.framework
+    - Contents/Resources/media-control/lib/media-control/MediaRemoteAdapterTestClient
   extendInfo:
     NSAudioCaptureUsageDescription: Audelyra 需要捕获系统音频，用于把正在播放的声音实时可视化。
 dmg:

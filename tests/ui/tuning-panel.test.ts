@@ -2,8 +2,8 @@ import { describe, it, expect, beforeEach, vi } from 'vitest'
 import { TuningPanel, type TuningPanelDeps } from '../../src/ui/tuning-panel'
 import { PanelCoordinator, type PanelLike, type UiStageLike } from '../../src/ui/panel-coordinator'
 import type { UiFocusProfile } from '../../src/scenes/types'
-import { defaultRhythmPreset, sanitizeMappingValues } from '../../src/scenes/nebula/mapping/spec'
-import type { MappingValues } from '../../src/scenes/nebula/mapping/types'
+import { USER_REACTION_PREFIX, defaultRhythmPreset, makeReaction, newUserReactionId, sanitizeMappingValues } from '../../src/scenes/nebula/mapping/spec'
+import type { MappingValues, Reaction } from '../../src/scenes/nebula/mapping/types'
 import { DEFAULT_MACRO_KNOBS, macroToMapping, type MacroKnobs } from '../../src/scenes/nebula/mapping/macro'
 import type { ShapeSettings } from '../../src/scenes/nebula/shapes/types'
 import { DEFAULT_MOTION_SETTINGS } from '../../src/scenes/nebula/motion/types'
@@ -11,6 +11,9 @@ import { DEFAULT_CAMERA_SETTINGS } from '../../src/scenes/nebula/camera-types'
 import { DEFAULT_TITLE_SETTINGS } from '../../src/scenes/nebula/title-fx'
 import { DEFAULT_LYRICS_SETTINGS } from '../../src/scenes/nebula/lyrics/lyrics-fx'
 import { DEFAULT_BACKGROUND_SETTINGS, type BackgroundSettings } from '../../src/scenes/nebula/background-types'
+
+/** 按官方基线 id 取反应（R1-1 起 mapping 是反应列表，不再是 targets 字典） */
+const ruleOf = (m: MappingValues, id: string): Reaction => m.reactions.find((r) => r.id === id)!
 
 /** 轻量假「设置」面板——只为验证互斥，不需要真实 DOM（同 panel-coordinator.test.ts 的 FakePanel） */
 class FakeSettingsPanel implements PanelLike {
@@ -158,6 +161,13 @@ function rangeIn(row: FakeEl): FakeEl {
   return hit
 }
 
+/** 取某个开关行里的 ToggleSwitch track——开关行的命中区只有 track 自身，翻转必须点它 */
+function trackIn(row: FakeEl): FakeEl {
+  const hit = findByRole(row, 'toggle-track')
+  if (!hit) throw new Error('该行无 ToggleSwitch')
+  return hit
+}
+
 /** 取某行子树里全部 range input，按 DOM 顺序（专业表规则行依次为 强度/平滑/输出下限/输出上限） */
 function rangesIn(row: FakeEl): FakeEl[] {
   const out: FakeEl[] = []
@@ -178,6 +188,12 @@ function collectIcons(root: FakeEl): FakeEl[] {
   if (root.innerHTML.includes('<svg')) out.push(root)
   for (const c of root.children) out.push(...collectIcons(c))
   return out
+}
+
+/** 按文档序汇总子树的可见文案——FakeEl 的 textContent 不像真实 DOM 那样汇总子节点，
+ * 而摘要行拆成了「来源名 + 偏离注解」两段 span（明暗分档），整行文案得这样拼回来 */
+function textOf(root: FakeEl): string {
+  return root.textContent + root.children.map(textOf).join('')
 }
 
 function makeDeps(mapping: MappingValues, background: BackgroundSettings = structuredClone(DEFAULT_BACKGROUND_SETTINGS)): TuningPanelDeps & {
@@ -228,7 +244,7 @@ async function flush(): Promise<void> {
 describe('TuningPanel（右侧调音台——拖动预览/松手保存，本地乐观 draft）', () => {
   it('播种：深拷贝 getMapping 结果，不污染源对象', async () => {
     const mapping = defaultRhythmPreset()
-    const originalGain = mapping.targets.speed.primary.gain
+    const originalGain = ruleOf(mapping, 'body.speed.primary').gain
     const deps = makeDeps(mapping)
     new TuningPanel(fakeElement() as unknown as HTMLElement, deps)
     await flush()
@@ -242,9 +258,9 @@ describe('TuningPanel（右侧调音台——拖动预览/松手保存，本地�
 
     expect(deps.commitMapping).toHaveBeenCalledTimes(1)
     const committed = deps.commitMapping.mock.calls[0][0] as MappingValues
-    expect(committed.targets.speed.primary.gain).toBe(3)
+    expect(ruleOf(committed, 'body.speed.primary').gain).toBe(3)
     // 源对象必须保持原值——证明播种时做了深拷贝，而非持有引用原地改
-    expect(mapping.targets.speed.primary.gain).toBe(originalGain)
+    expect(ruleOf(mapping, 'body.speed.primary').gain).toBe(originalGain)
   })
 
   it('拖动预览（input）只 preview 不 commit；松手（change）才 commit 落盘', async () => {
@@ -259,11 +275,11 @@ describe('TuningPanel（右侧调音台——拖动预览/松手保存，本地�
 
     expect(deps.previewMapping).toHaveBeenCalledTimes(1)
     expect(deps.commitMapping).not.toHaveBeenCalled()
-    expect((deps.previewMapping.mock.calls[0][0] as MappingValues).targets.speed.primary.gain).toBe(2.5)
+    expect(ruleOf(deps.previewMapping.mock.calls[0][0] as MappingValues, 'body.speed.primary').gain).toBe(2.5)
 
     gainSlider.dispatch('change')
     expect(deps.commitMapping).toHaveBeenCalledTimes(1)
-    expect((deps.commitMapping.mock.calls[0][0] as MappingValues).targets.speed.primary.gain).toBe(2.5)
+    expect(ruleOf(deps.commitMapping.mock.calls[0][0] as MappingValues, 'body.speed.primary').gain).toBe(2.5)
   })
 
   it('不再渲染「导出当前值」按钮（item 1：砍导出）', async () => {
@@ -346,7 +362,7 @@ describe('TuningPanel（右侧调音台——拖动预览/松手保存，本地�
 
     expect(deps.commitMapping).toHaveBeenCalledTimes(1)
     const committed = deps.commitMapping.mock.calls[0][0] as MappingValues
-    expect(committed.targets.speed.primary.source).toBe('loudness') // 英文枚举，不是 '响度'
+    expect(ruleOf(committed, 'body.speed.primary').source).toBe('loudness') // 英文枚举，不是 '响度'
   })
 
   it('不再渲染独立的规则解释文字行（spec.label 只留在信息图标 tooltip 里，item 亲验：删文字行）', async () => {
@@ -446,30 +462,32 @@ describe('TuningPanel（右侧调音台——拖动预览/松手保存，本地�
     expect(tipTexts).toContain('选择由哪个音频特征来驱动')
   })
 
-  it('多规则组（space/brightness）每条规则都有文字子标题，不再是孤零零的信息图标子头（item 6）', async () => {
+  it('同属性多条反应时每条摘要行都取来源中文名（层级重构：子标题收进摘要行，比「反应 1/2」有信息量且自动跟随修改）', async () => {
     const mapping = defaultRhythmPreset()
     const deps = makeDeps(mapping)
     new TuningPanel(fakeElement() as unknown as HTMLElement, deps)
     await flush()
 
-    // MAPPING_SPEC space: primary='空间·脉冲锚' secondary='空间·段落收放'；brightness: primary='亮度·脉冲提亮' secondary='亮度·高频碎光'
-    for (const subName of ['脉冲锚', '段落收放', '脉冲提亮', '高频碎光']) {
-      const subHeader = created.find((el) => el.textContent === subName)
-      expect(subHeader, `缺少子标题：${subName}`).toBeTruthy()
-      // 子标题本身不挂 ⓘ（子名即标题，不需要再解释）
-      expect(subHeader!.innerHTML.includes('<svg')).toBe(false)
+    // 默认预设里 body.space 挂 beat+energy 两条、body.brightness 挂 beat+high 两条
+    for (const id of ['body.space.primary', 'body.space.secondary', 'body.brightness.primary', 'body.brightness.secondary']) {
+      const summary = findByRole(created[0], `summary-${id}`)
+      expect(summary, `缺少摘要行：${id}`).toBeTruthy()
+      // 摘要行本身不挂 ⓘ（来源名即标题，不需要再解释）——按子树里有没有 svg 节点判定，
+      // 不能查 summary.innerHTML：FakeEl 的 innerHTML 只在被赋值时才有内容，摘要行从不赋值它，恒为空串
+      expect(collectIcons(summary!)).toHaveLength(0)
     }
+    expect(textOf(findByRole(created[0], 'summary-body.space.primary')!)).toBe('鼓点')
+    expect(textOf(findByRole(created[0], 'summary-body.space.secondary')!)).toBe('能量')
   })
 
-  it('单规则组（speed/density/thickness）不渲染子标题，控件直接跟在组标题下（item 6，保持既有认可样式不动）', async () => {
+  it('属性下只有一条反应时摘要行同样渲染来源名（层级重构：不再有「单条省略标题」的例外分支）', async () => {
     const mapping = defaultRhythmPreset()
     const deps = makeDeps(mapping)
     new TuningPanel(fakeElement() as unknown as HTMLElement, deps)
     await flush()
 
-    // speed·primary 唯一规则名「全场速度感」不应作为独立子标题节点出现
-    const subHeader = created.find((el) => el.textContent === '全场速度感')
-    expect(subHeader).toBeUndefined()
+    // speed 只有一条反应 → 摘要行仍然存在，不因单条而省略
+    expect(findByRole(created[0], 'summary-body.speed.primary')).toBeTruthy()
   })
 
   it('注册协调器后，设置开着时 open 调音台 → 设置自动 close（互斥）', async () => {
@@ -1493,7 +1511,7 @@ describe('律动 tab 能力自适应（mixer v2）', () => {
 
   it('切回星云（onShapeChanged 回流）：五组齐全，被隐目标的规则值未丢', async () => {
     const mapping = defaultRhythmPreset()
-    mapping.targets.space.primary.gain = 1.7 // 哨兵值：隐藏期间不许被改（GAIN_MAX=2 内合法）
+    ruleOf(mapping, 'body.space.primary').gain = 1.7 // 哨兵值：隐藏期间不许被改（GAIN_MAX=2 内合法）
     const deps = makeDeps(mapping)
     deps.getShape = vi.fn(async () => ({ current: 'laser' as const, customCurrent: null, customShapes: [], coverPriority: false, showBody: true }))
     const parent = fakeElement()
@@ -1505,6 +1523,127 @@ describe('律动 tab 能力自适应（mixer v2）', () => {
     expect(treeTexts(body)).toContain('空间')
     // 值不丢：空间组重新渲染后，强度滑块初值=哨兵值（滑块 value 由 draft 播种，见 makeRange）
     expect(created.some((el) => el.type === 'range' && el.value === '1.7')).toBe(true)
+  })
+
+  // —— R1-1 反应寻址：元素分组 + 增删复制 ——
+
+  it('律动页按元素分组：主体与背景两组，背景属性不受形状能力矩阵影响', async () => {
+    const deps = makeDeps(defaultRhythmPreset())
+    // 激光不吃「空间」，但背景三属性任何形状下都在场
+    deps.getShape = vi.fn(async () => ({ current: 'laser' as const, customCurrent: null, customShapes: [], coverPriority: false, showBody: true }))
+    const parent = fakeElement()
+    const panel = new TuningPanel(parent as unknown as HTMLElement, deps)
+    await flush()
+    const body = panel.generalBodyForTest as unknown as FakeEl
+    const texts = treeTexts(body)
+    expect(texts).toContain('主体')
+    expect(texts).toContain('背景')
+    expect(texts).not.toContain('空间')                               // 能力矩阵过滤仍生效
+    for (const label of ['显影', '明暗', '饱和']) expect(texts).toContain(label)
+  })
+
+  it('没有自定义背景时给出「上传背景图后生效」提示，上传后提示消失（不隐藏该组，它是引导入口）', async () => {
+    const deps = makeDeps(defaultRhythmPreset())
+    const parent = fakeElement()
+    const panel = new TuningPanel(parent as unknown as HTMLElement, deps)
+    await flush()
+    const body = panel.generalBodyForTest as unknown as FakeEl
+    expect(findByRole(body, 'backdrop-needs-image'), '内置极光下应提示').toBeTruthy()
+
+    const cb = (deps.onBackgroundChanged as ReturnType<typeof vi.fn>).mock.calls[0][0] as (b: BackgroundSettings) => void
+    cb({ ...DEFAULT_BACKGROUND_SETTINGS, current: '11111111-2222-3333-4444-555555555555' })
+    expect(findByRole(panel.generalBodyForTest as unknown as FakeEl, 'backdrop-needs-image'),
+      '传图后提示须消失').toBeNull()
+  })
+
+  it('添加反应：落盘一条新反应且列表里立刻多出一行', async () => {
+    const deps = makeDeps(defaultRhythmPreset())
+    const parent = fakeElement()
+    const panel = new TuningPanel(parent as unknown as HTMLElement, deps)
+    await flush()
+    const body = () => panel.generalBodyForTest as unknown as FakeEl
+    findByRole(body(), 'add-reaction-body-speed')!.dispatch('click')
+
+    const committed = deps.commitMapping.mock.calls.at(-1)![0] as MappingValues
+    const onSpeed = committed.reactions.filter((r) => r.target.element === 'body' && r.target.property === 'speed')
+    expect(onSpeed).toHaveLength(2)
+    expect(onSpeed[1].source, '新反应的源取白名单首项').toBe('tempo')
+    // 新增的一行也该有自己的摘要行（层级重构：摘要行恒有名字，不因条数变化而增减）
+    expect(findByRole(body(), `summary-${onSpeed[1].id}`)).toBeTruthy()
+  })
+
+  it('删除反应：可以删到一条不剩，此时给出空状态而不是消失', async () => {
+    const deps = makeDeps(defaultRhythmPreset())
+    const parent = fakeElement()
+    const panel = new TuningPanel(parent as unknown as HTMLElement, deps)
+    await flush()
+    const body = () => panel.generalBodyForTest as unknown as FakeEl
+    findByRole(body(), 'delete-reaction-body.speed.primary')!.dispatch('click')
+
+    const committed = deps.commitMapping.mock.calls.at(-1)![0] as MappingValues
+    expect(committed.reactions.some((r) => r.id === 'body.speed.primary')).toBe(false)
+    // 空态不再是独立文案行——整个属性行本身变成「点一下即添加」的入口（律动页层级重构）
+    expect(findByRole(body(), 'empty-add-body-speed'), '空属性须整行可点添加').toBeTruthy()
+  })
+
+  it('复制反应：新反应带独立 id、值与原条一致，且插在原条之后', async () => {
+    const mapping = defaultRhythmPreset()
+    ruleOf(mapping, 'body.thickness.primary').gain = 1.65
+    const deps = makeDeps(mapping)
+    const parent = fakeElement()
+    const panel = new TuningPanel(parent as unknown as HTMLElement, deps)
+    await flush()
+    findByRole(panel.generalBodyForTest as unknown as FakeEl, 'copy-reaction-body.thickness.primary')!.dispatch('click')
+
+    const committed = deps.commitMapping.mock.calls.at(-1)![0] as MappingValues
+    const at = committed.reactions.findIndex((r) => r.id === 'body.thickness.primary')
+    const copy = committed.reactions[at + 1]
+    expect(copy.id).not.toBe('body.thickness.primary')
+    expect(copy.gain).toBe(1.65)
+    expect(copy.target).toEqual({ element: 'body', property: 'thickness' })
+  })
+
+  it('复制反应：新 id 不与存档里已有的用户反应撞号，改副本不会连原件一起改', async () => {
+    // 计数器只活在进程内、发出的 id 却会落盘：重开应用后它从头再发一遍。
+    // 这里让存档里那条用户反应正好占住「本次将发的号」，复现重开后复制即联动的现象。
+    const seq = parseInt(newUserReactionId().slice(USER_REACTION_PREFIX.length), 36)
+    const staleId = `${USER_REACTION_PREFIX}${(seq + 1).toString(36)}`
+    const mapping = defaultRhythmPreset()
+    const stale: Reaction = { ...ruleOf(mapping, 'body.thickness.primary'), id: staleId, gain: 1.2, target: { element: 'body', property: 'thickness' } }
+    mapping.reactions.push(stale)
+    const deps = makeDeps(mapping)
+    const panel = new TuningPanel(fakeElement() as unknown as HTMLElement, deps)
+    await flush()
+    const body = (): FakeEl => panel.generalBodyForTest as unknown as FakeEl
+    findByRole(body(), `copy-reaction-${staleId}`)!.dispatch('click')
+
+    const afterCopy = deps.commitMapping.mock.calls.at(-1)![0] as MappingValues
+    const copyId = afterCopy.reactions[afterCopy.reactions.findIndex((r) => r.id === staleId) + 1].id
+    expect(copyId, '副本 id 必须与存档里已有的不同').not.toBe(staleId)
+
+    // 副本复制后自动展开：拖它的「强度」滑块（展开区第一个 range），原件的强度不得跟着变
+    rangesIn(findByRole(body(), `detail-${copyId}`)!)[0].value = '0.35'
+    rangesIn(findByRole(body(), `detail-${copyId}`)!)[0].dispatch('change')
+
+    const committed = deps.commitMapping.mock.calls.at(-1)![0] as MappingValues
+    expect(committed.reactions.find((r) => r.id === copyId)!.gain).toBe(0.35)
+    expect(committed.reactions.find((r) => r.id === staleId)!.gain, '原件不该被副本带着改').toBe(1.2)
+  })
+
+  it('用户手加的反应不被宏旋钮删掉——这是反应可增删之后最容易丢数据的一处', async () => {
+    const mapping = defaultRhythmPreset()
+    const mine = makeReaction({ element: 'body', property: 'density' })
+    mine.gain = 1.85
+    mapping.reactions.push(mine)
+    const deps = makeDeps(mapping)
+    const parent = fakeElement()
+    const panel = new TuningPanel(parent as unknown as HTMLElement, deps)
+    await flush()
+    // 点「节奏」风格：走的是全量投影路径
+    findByRole(panel.generalBodyForTest as unknown as FakeEl, 'macro-style-rhythmic')!.dispatch('click')
+
+    const committed = deps.commitMapping.mock.calls.at(-1)![0] as MappingValues
+    expect(committed.reactions.find((r) => r.id === mine.id), '用户反应必须还在').toEqual(mine)
   })
 
   it('tab 栏五标签：律动 / 主体 / 镜头 / 歌词歌名 / 背景', async () => {
@@ -1572,11 +1711,11 @@ describe('TuningPanel：标准层宏旋钮', () => {
     const committed = deps.commitMapping.mock.calls.at(-1)![0] as MappingValues
     // 均衡档下 brightness.primary 是 lead（speed.primary 是 neutral，strength=1 时 gain 恒等于播种值 1，
     // 探针没有区分度，测不出重刷回归），strength=1 → gain 1×1.5=1.5，与播种值 1 有区分度
-    expect(committed.targets.brightness.primary.gain).toBeCloseTo(projected.targets.brightness.primary.gain, 5)
+    expect(ruleOf(committed, 'body.brightness.primary').gain).toBeCloseTo(ruleOf(projected, 'body.brightness.primary').gain, 5)
     // 重刷专业表：松手后底下 brightness·primary 的「强度」滑块（行内第一个 range）跳到投影后的值——
     // 只断言 commit 入参会漏掉这条链路（去掉重刷仍全绿），故直接读 DOM
-    expect(rangeIn(findByRole(body, 'rule-brightness-primary')!).value)
-      .toBe(String(projected.targets.brightness.primary.gain))
+    expect(rangeIn(findByRole(body, 'rule-body.brightness.primary')!).value)
+      .toBe(String(ruleOf(projected, 'body.brightness.primary').gain))
   })
 
   it('重置按钮：两旋钮回中点 = 默认预设', async () => {
@@ -1588,7 +1727,7 @@ describe('TuningPanel：标准层宏旋钮', () => {
     const slider = rangeIn(findByRole(body, 'macro-knob-strength')!)
     slider.value = '1'; slider.dispatch('change')
     // 点重置
-    findByRole(panel.generalBodyForTest as unknown as FakeEl, 'macro-reset')!.dispatch('click')
+    findByRole(panel.generalBodyForTest as unknown as FakeEl, 'factory-reset')!.dispatch('click')
     expect(deps.commitMacroKnobs.mock.calls.at(-1)![0]).toEqual(DEFAULT_MACRO_KNOBS)
     const committed = deps.commitMapping.mock.calls.at(-1)![0] as MappingValues
     expect(committed).toEqual(defaultRhythmPreset())
@@ -1617,7 +1756,7 @@ describe('TuningPanel：标准层宏旋钮', () => {
     const strength = rangeIn(findByRole(body, 'macro-knob-strength')!)
     strength.value = '1'; strength.dispatch('change')
 
-    findByRole(body, 'macro-reset')!.dispatch('click')
+    findByRole(body, 'factory-reset')!.dispatch('click')
     for (const role of ['macro-knob-strength', 'macro-knob-response']) {
       expect(rangeIn(findByRole(body, role)!).value, role).toBe('0.5')
     }
@@ -1629,14 +1768,14 @@ describe('TuningPanel：标准层宏旋钮', () => {
     await flush()
     const body = panel.generalBodyForTest as unknown as FakeEl
     const before = rangeIn(findByRole(body, 'macro-knob-strength')!)
-    const resetBefore = findByRole(body, 'macro-reset')!
+    const resetBefore = findByRole(body, 'factory-reset')!
 
     before.value = '0.7'; before.dispatch('change')
     expect(rangeIn(findByRole(body, 'macro-knob-strength')!)).toBe(before)
 
     // 重置按钮同理：不再在自己的 click 回调里被销毁
     resetBefore.dispatch('click')
-    expect(findByRole(body, 'macro-reset')).toBe(resetBefore)
+    expect(findByRole(body, 'factory-reset')).toBe(resetBefore)
     expect(rangeIn(findByRole(body, 'macro-knob-strength')!)).toBe(before)
   })
 })
@@ -1654,7 +1793,7 @@ describe('TuningPanel：宏旋钮陈旧提示', () => {
 
     // 专业表手调一个规则滑块（speed·primary gain，宏旋钮之下第一个非宏 range）——
     // 找 macroSlot 之外的第一个 range：用 buildRuleEditor 的「强度」行
-    const proRow = findByRole(body(), 'rule-speed-primary')! // 规则编辑器行锚点
+    const proRow = findByRole(body(), 'rule-body.speed.primary')! // 规则编辑器行锚点
     const proSlider = rangeIn(proRow)
     proSlider.value = '1.5'; proSlider.dispatch('change')
 
@@ -1671,7 +1810,7 @@ describe('TuningPanel：宏旋钮陈旧提示', () => {
 
   it('老存档：mapping 是手调值 + 旋钮停在中点 → 面板一打开就点亮（陈旧位从数据推导，跨重启有效）', async () => {
     const tweaked = defaultRhythmPreset()
-    tweaked.targets.speed.primary.gain = 1.7 // 手调痕迹：与中点旋钮的投影（=默认预设）对不上
+    ruleOf(tweaked, 'body.speed.primary').gain = 1.7 // 手调痕迹：与中点旋钮的投影（=默认预设）对不上
     const deps = makeDeps(tweaked) // 旋钮位置=默认均衡档 + 两个 0.5（老存档没有该字段时也是这个回退值）
     const panel = new TuningPanel(fakeElement() as unknown as HTMLElement, deps)
     await flush()
@@ -1726,11 +1865,11 @@ describe('TuningPanel：风格按钮', () => {
       .toEqual({ style: 'rhythmic', strength: 0.5, response: 0.5 })
     const committed = deps.commitMapping.mock.calls.at(-1)![0] as MappingValues
     expect(committed).toEqual(macroToMapping({ style: 'rhythmic', strength: 0.5, response: 0.5 }))
-    expect(committed.targets.speed.primary.source).toBe('energy')
+    expect(ruleOf(committed, 'body.speed.primary').source).toBe('energy')
 
     // 重刷专业表（DOM 断言，不是 mock 入参）：speed 行的「平滑」滑块从默认 1000ms 变成节奏档的 200ms。
     // 删掉 applyMacro 里的 buildRuleRows 这条会红。
-    const proRow = findByRole(panel.generalBodyForTest as unknown as FakeEl, 'rule-speed-primary')!
+    const proRow = findByRole(panel.generalBodyForTest as unknown as FakeEl, 'rule-body.speed.primary')!
     expect(rangesIn(proRow)[1].value).toBe('200')
 
     // 选中态跟着迁移（风格行不重建，靠 makeChoiceRow 内部 paint）
@@ -1746,7 +1885,7 @@ describe('TuningPanel：风格按钮', () => {
     const body = panel.generalBodyForTest as unknown as FakeEl
 
     findByRole(body, 'macro-style-bass')!.dispatch('click')
-    findByRole(panel.generalBodyForTest as unknown as FakeEl, 'macro-reset')!.dispatch('click')
+    findByRole(panel.generalBodyForTest as unknown as FakeEl, 'factory-reset')!.dispatch('click')
 
     expect(deps.commitMacroKnobs.mock.calls.at(-1)![0]).toEqual(DEFAULT_MACRO_KNOBS)
     const committed = deps.commitMapping.mock.calls.at(-1)![0] as MappingValues
@@ -1779,7 +1918,7 @@ describe('TuningPanel：高级调整折叠', () => {
     const body = panel.generalBodyForTest as unknown as FakeEl
     const toggle = findByRole(body, 'advanced-toggle')
     expect(toggle).toBeTruthy()
-    expect(toggle!.textContent).toContain('高级调整')
+    expect(findByRole(body, 'advanced-toggle-label')!.textContent).toContain('高级调整')
     expect(findByRole(body, 'rule-rows')!.style.display).toBe('none')
   })
 
@@ -1822,6 +1961,677 @@ describe('TuningPanel：高级调整折叠', () => {
 
     const rows = findByRole(panel.generalBodyForTest as unknown as FakeEl, 'rule-rows')!
     expect(rows.style.display, '重建不许掀开折叠').toBe('none')
-    expect(rangeIn(findByRole(rows, 'rule-brightness-primary')!).value, '收起态下值仍须跟着更新').toBe('1.5')
+    expect(rangeIn(findByRole(rows, 'rule-body.brightness.primary')!).value, '收起态下值仍须跟着更新').toBe('1.5')
+  })
+})
+
+describe('律动页层级：反应折叠成摘要行（手风琴）', () => {
+  /** 展开高级调整——折叠区默认收起，不展开拿不到内部节点 */
+  async function openAdvanced(): Promise<{ panel: TuningPanel; deps: ReturnType<typeof makeDeps> }> {
+    const deps = makeDeps(defaultRhythmPreset())
+    deps.getAdvancedExpanded = vi.fn(async () => true)
+    const panel = new TuningPanel(fakeElement() as unknown as HTMLElement, deps)
+    await flush()
+    return { panel, deps }
+  }
+
+  it('默认态：所有展开区 display 为 none', async () => {
+    const { panel } = await openAdvanced()
+    const body = panel.generalBodyForTest as unknown as FakeEl
+    const detail = findByRole(body, 'detail-body.speed.primary')!
+    expect(detail).toBeTruthy()
+    expect(detail.style.display).toBe('none')
+  })
+
+  it('点摘要行展开该条，箭头翻转', async () => {
+    const { panel } = await openAdvanced()
+    const body = panel.generalBodyForTest as unknown as FakeEl
+    findByRole(body, 'summary-body.speed.primary')!.dispatch('click')
+    expect(findByRole(body, 'detail-body.speed.primary')!.style.display).toBe('')
+    expect(findByRole(body, 'caret-body.speed.primary')!.textContent).toBe('▾')
+  })
+
+  it('点箭头（caret）或摘要行留白也能展开——不止点文字本身命中', async () => {
+    const { panel } = await openAdvanced()
+    const body = panel.generalBodyForTest as unknown as FakeEl
+    const caret = findByRole(body, 'caret-body.speed.primary')!
+    // caret 与 summary（文字）的共同父节点是 summaryRow——真实 DOM 下点 caret 会冒泡到它，
+    // FakeEl 不模拟冒泡，这里直接在 summaryRow 上派发一个 target=caret 的事件等效模拟
+    const summaryRow = caret._parent!
+    summaryRow.dispatch('click', { target: caret })
+    expect(findByRole(body, 'detail-body.speed.primary')!.style.display).toBe('')
+    expect(findByRole(body, 'caret-body.speed.primary')!.textContent).toBe('▾')
+  })
+
+  it('summaryRow 收到目标在 summary 内的冒泡事件时不重复触发（防真实 DOM 下点文字被处理两次）', async () => {
+    const { panel } = await openAdvanced()
+    const body = panel.generalBodyForTest as unknown as FakeEl
+    const summary = findByRole(body, 'summary-body.speed.primary')!
+    const summaryRow = summary._parent!
+    // 模拟「点 summary 本体，事件冒泡到 summaryRow」——summary 自己的监听器已经处理过，
+    // summaryRow 的委托监听须识别出目标在 summary 内而跳过，否则同一次点击会被处理两次（展开又收起）
+    summaryRow.dispatch('click', { target: summary })
+    expect(findByRole(body, 'detail-body.speed.primary')!.style.display).toBe('none')
+  })
+
+  it('手风琴：展开第二条时第一条自动收起', async () => {
+    const { panel } = await openAdvanced()
+    const body = panel.generalBodyForTest as unknown as FakeEl
+    findByRole(body, 'summary-body.speed.primary')!.dispatch('click')
+    findByRole(body, 'summary-body.density.primary')!.dispatch('click')
+    expect(findByRole(body, 'detail-body.speed.primary')!.style.display).toBe('none')
+    expect(findByRole(body, 'detail-body.density.primary')!.style.display).toBe('')
+  })
+
+  it('再点已展开的那条则收起', async () => {
+    const { panel } = await openAdvanced()
+    const body = panel.generalBodyForTest as unknown as FakeEl
+    const summary = findByRole(body, 'summary-body.speed.primary')!
+    summary.dispatch('click')
+    summary.dispatch('click')
+    expect(findByRole(body, 'detail-body.speed.primary')!.style.display).toBe('none')
+  })
+
+  it('默认预设下摘要行不含任何数字（基准=宏旋钮基线）', async () => {
+    const { panel } = await openAdvanced()
+    const body = panel.generalBodyForTest as unknown as FakeEl
+    const text = textOf(findByRole(body, 'summary-body.speed.primary')!)
+    expect(text).not.toMatch(/\d/)
+  })
+
+  it('改强度后摘要行浮出「强 X.XX」，且不触发整块重建', async () => {
+    const { panel } = await openAdvanced()
+    const body = panel.generalBodyForTest as unknown as FakeEl
+    const detail = findByRole(body, 'detail-body.speed.primary')!
+    const gain = rangesIn(detail)[0]
+    gain.value = '2.5'
+    gain.dispatch('change')
+    // 同一节点原地改文案——若走了整块重建，这个引用会被 detach，textContent 停在旧值
+    expect(textOf(findByRole(body, 'summary-body.speed.primary')!)).toContain('强 2.50')
+  })
+
+  it('关掉一条后摘要行标「已关」', async () => {
+    const { panel } = await openAdvanced()
+    const body = panel.generalBodyForTest as unknown as FakeEl
+    const detail = findByRole(body, 'detail-body.speed.primary')!
+    // 展开区首个 toggle 即「启用」——命中区只有 track，点它才翻转
+    trackIn(findByRole(detail, 'rule-enabled-body.speed.primary')!).dispatch('click')
+    expect(textOf(findByRole(body, 'summary-body.speed.primary')!)).toContain('已关')
+  })
+})
+
+describe('律动页层级：下限/上限收进「更多」', () => {
+  async function openFirst(): Promise<FakeEl> {
+    const deps = makeDeps(defaultRhythmPreset())
+    deps.getAdvancedExpanded = vi.fn(async () => true)
+    const panel = new TuningPanel(fakeElement() as unknown as HTMLElement, deps)
+    await flush()
+    const body = panel.generalBodyForTest as unknown as FakeEl
+    findByRole(body, 'summary-body.speed.primary')!.dispatch('click')
+    return body
+  }
+
+  it('展开一条反应时，「更多」区默认收起', async () => {
+    const body = await openFirst()
+    expect(findByRole(body, 'more-body.speed.primary')!.style.display).toBe('none')
+  })
+
+  it('点「更多」展开下限/上限', async () => {
+    const body = await openFirst()
+    findByRole(body, 'more-toggle-body.speed.primary')!.dispatch('click')
+    expect(findByRole(body, 'more-body.speed.primary')!.style.display).toBe('')
+  })
+
+  it('「更多」收起时下限/上限的滑块仍在 DOM——折叠走 display 不走懒建', async () => {
+    const body = await openFirst()
+    const detail = findByRole(body, 'detail-body.speed.primary')!
+    // 强度/平滑/下限/上限四条，顺序不因折叠而变
+    expect(rangesIn(detail).length).toBe(4)
+  })
+})
+
+describe('律动页层级：hover 添加 + 空属性行即按钮', () => {
+  /** 造一份「背景明暗无反应」的 mapping——官方基线本就不含 backdrop.brightness */
+  async function open(): Promise<{ body: FakeEl; deps: ReturnType<typeof makeDeps> }> {
+    const deps = makeDeps(defaultRhythmPreset())
+    deps.getAdvancedExpanded = vi.fn(async () => true)
+    const panel = new TuningPanel(fakeElement() as unknown as HTMLElement, deps)
+    await flush()
+    return { body: panel.generalBodyForTest as unknown as FakeEl, deps }
+  }
+
+  it('「添加」默认不可见，hover 属性行才显示', async () => {
+    const { body } = await open()
+    const add = findByRole(body, 'add-reaction-body-speed')!
+    expect(add.style.visibility).toBe('hidden')
+    findByRole(body, 'property-body-speed')!.dispatch('mouseenter')
+    expect(add.style.visibility).toBe('visible')
+    findByRole(body, 'property-body-speed')!.dispatch('mouseleave')
+    expect(add.style.visibility).toBe('hidden')
+  })
+
+  it('空属性不再渲染空态文案', async () => {
+    const { body } = await open()
+    expect(findByRole(body, 'empty-backdrop-brightness')).toBeNull()
+  })
+
+  it('空属性整行可点，点一下就多出一条反应且直接展开', async () => {
+    const { body, deps } = await open()
+    findByRole(body, 'empty-add-backdrop-brightness')!.dispatch('click')
+    const committed = deps.commitMapping.mock.calls.at(-1)![0] as MappingValues
+    const added = committed.reactions.filter(
+      (r) => r.target.element === 'backdrop' && r.target.property === 'brightness')
+    expect(added.length).toBe(1)
+    // 新反应处于展开态——否则点了只多出一行灰字，看起来像没生效
+    expect(findByRole(body, `detail-${added[0].id}`)!.style.display).toBe('')
+  })
+
+  it('「添加」加出的反应同样直接展开', async () => {
+    const { body, deps } = await open()
+    findByRole(body, 'add-reaction-body-speed')!.dispatch('click')
+    const committed = deps.commitMapping.mock.calls.at(-1)![0] as MappingValues
+    const added = committed.reactions.filter((r) => r.id.startsWith('u-'))
+    expect(added.length).toBe(1)
+    expect(findByRole(body, `detail-${added[0].id}`)!.style.display).toBe('')
+  })
+
+  it('点空属性行的 ⓘ 图标不新增反应——用户想看说明，不是想加一条', async () => {
+    const { body, deps } = await open()
+    const nameGroup = findByRole(body, 'empty-add-backdrop-brightness')!
+    // 按内容找图标（innerHTML 含 <svg>）而非按子节点位置索引——同 collectIcons 的定位惯例，
+    // 不受「属性名与图标之间插入新子节点」影响
+    const icon = collectIcons(nameGroup)[0]
+    // FakeEl 不模拟事件冒泡：对承载新增监听的 nameGroup 派发，把 target 指向图标节点，
+    // 才能测到「点击源自图标则跳过新增」的判定逻辑
+    nameGroup.dispatch('click', { target: icon })
+    expect(deps.commitMapping).not.toHaveBeenCalled()
+  })
+
+  it('空属性行撑满整宽（flex: 1）——不然只有属性名那几十像素可点，右侧留白全是死区', async () => {
+    const { body } = await open()
+    expect(findByRole(body, 'empty-add-backdrop-brightness')!.style.flex).toBe('1')
+  })
+})
+
+describe('律动页层级：视觉规范（反应名比属性名更亮）', () => {
+  async function open(): Promise<FakeEl> {
+    const deps = makeDeps(defaultRhythmPreset())
+    deps.getAdvancedExpanded = vi.fn(async () => true)
+    const panel = new TuningPanel(fakeElement() as unknown as HTMLElement, deps)
+    await flush()
+    return panel.generalBodyForTest as unknown as FakeEl
+  }
+
+  it('摘要行缩进 14px、展开区缩进 28px——层级靠缩进承担', async () => {
+    const body = await open()
+    // 缩进锚点是 summary-row（承载 padding 的那层），不是文案节点 summary——
+    // 后者若也吃一份 14px，真实 DOM 下会与 caret 叠加成 28px 且和箭头错位
+    expect(findByRole(body, 'summary-row-body.speed.primary')!.style.paddingLeft).toBe('14px')
+    expect(findByRole(body, 'detail-body.speed.primary')!.style.paddingLeft).toBe('28px')
+  })
+
+  it('反应摘要比属性名更亮——属性是框架，反应是内容', async () => {
+    const body = await open()
+    const summary = findByRole(body, 'summary-body.speed.primary')!
+    expect(summary.style.color).toContain('0.75')
+    expect(findByRole(body, 'property-name-body-speed')!.style.color).toContain('0.55')
+  })
+
+  it('偏离参数段比来源名淡一档——注解不是主角', async () => {
+    const body = await open()
+    expect(findByRole(body, 'summary-note-body.speed.primary')!.style.color).toContain('0.45')
+  })
+
+  it('展开区字号 12px——比属性名/摘要行的 13px 小一档', async () => {
+    const body = await open()
+    expect(findByRole(body, 'detail-body.speed.primary')!.style.fontSize).toBe('12px')
+  })
+
+  it('不新增边框/卡片/底色——摘要行、展开区、属性块、操作行、「更多」区都不带 border 或 background', async () => {
+    const body = await open()
+    // 两种写法都要扫：本文件既有 cssText 整块写，也有 el.style.xxx 属性单写（后者是主流），
+    // 只查其中一种就会漏——将来若有人按设计稿的备选补救手段加 rgba(255,255,255,0.02) 底色，
+    // 几乎必然是属性写法
+    const props = ['border', 'borderLeft', 'borderTop', 'borderBottom', 'background', 'backgroundColor', 'boxShadow']
+    const roles = [
+      'summary-row-body.speed.primary', 'detail-body.speed.primary',
+      'property-body-speed', 'more-body.speed.primary',
+      'advanced-actions', 'undo', 'redo', 'factory-reset',
+    ]
+    for (const role of roles) {
+      const el = findByRole(body, role)!
+      expect(el, `缺少节点：${role}`).toBeTruthy()
+      expect(el.style.cssText ?? '', role).not.toMatch(/border|background|box-shadow/)
+      for (const p of props) expect(el.style[p] ?? '', `${role}.${p}`).toBe('')
+    }
+    const actions = findByRole(body, 'reaction-actions-body.speed.primary')!
+    expect(actions, '缺少节点：reaction-actions-body.speed.primary').toBeTruthy()
+    expect(actions.style.cssText ?? '').not.toMatch(/border|background|box-shadow/)
+    for (const p of props) expect(actions.style[p] ?? '', `actions.${p}`).toBe('')
+  })
+})
+
+describe('律动页层级：既有不变量回归', () => {
+  it('拖滑块不触发整块重建——重建会打断拖动并丢焦点', async () => {
+    const deps = makeDeps(defaultRhythmPreset())
+    deps.getAdvancedExpanded = vi.fn(async () => true)
+    const panel = new TuningPanel(fakeElement() as unknown as HTMLElement, deps)
+    await flush()
+    const body = panel.generalBodyForTest as unknown as FakeEl
+    findByRole(body, 'summary-body.speed.primary')!.dispatch('click')
+    const detail = findByRole(body, 'detail-body.speed.primary')!
+    const gain = rangesIn(detail)[0]
+    gain.value = '2'
+    gain.dispatch('input')
+    // 同一节点仍挂在树上 ⇒ 没有重建
+    expect(findByRole(body, 'detail-body.speed.primary')).toBe(detail)
+  })
+
+  it('拖宏旋钮后摘要行仍不含数字——基准跟随宏旋钮基线', async () => {
+    const deps = makeDeps(defaultRhythmPreset())
+    deps.getAdvancedExpanded = vi.fn(async () => true)
+    const panel = new TuningPanel(fakeElement() as unknown as HTMLElement, deps)
+    await flush()
+    const body = panel.generalBodyForTest as unknown as FakeEl
+    const knob = rangeIn(findByRole(body, 'macro-knob-strength')!)
+    knob.value = '0.85'
+    knob.dispatch('change')
+    // 锚点必须选一条「劲儿」真的会改到的反应：body.speed.primary 的 gain/smoothing 在任何旋钮位置
+    // 都等于出厂默认，锚在它身上时基准写成出厂默认也照样绿，锁不住任何东西。
+    // 亮度·主源被「劲儿」直接重铺（0.85 档 gain 1.00→1.35），基准一旦写错立刻浮出「强 1.35」
+    expect(textOf(findByRole(body, 'summary-body.brightness.primary')!)).not.toMatch(/\d/)
+  })
+
+  it('「更多」的展开态跨整块重建存活——与外层手风琴同款纪律', async () => {
+    const deps = makeDeps(defaultRhythmPreset())
+    deps.getAdvancedExpanded = vi.fn(async () => true)
+    const panel = new TuningPanel(fakeElement() as unknown as HTMLElement, deps)
+    await flush()
+    const body = panel.generalBodyForTest as unknown as FakeEl
+    findByRole(body, 'summary-body.speed.primary')!.dispatch('click')
+    findByRole(body, 'more-toggle-body.speed.primary')!.dispatch('click')
+    expect(findByRole(body, 'more-body.speed.primary')!.style.display).toBe('')
+
+    // 切形状会走 onShapeChanged 回流 → buildRuleRows 整块重建：外层手风琴仍开着，
+    // 里层「更多」若不跟着存活就会自己合上
+    const cb = (deps.onShapeChanged as ReturnType<typeof vi.fn>).mock.calls[0][0] as (s: ShapeSettings) => void
+    cb({ current: 'nebula', customCurrent: null, customShapes: [], coverPriority: true, showBody: true })
+
+    expect(findByRole(body, 'detail-body.speed.primary')!.style.display).toBe('')
+    expect(findByRole(body, 'more-body.speed.primary')!.style.display).toBe('')
+    expect(findByRole(body, 'more-toggle-body.speed.primary')!.textContent).toBe('▾ 更多')
+  })
+})
+
+describe('律动页层级：折叠态不记忆（每次打开面板全收）', () => {
+  it('展开一条 + 展开其「更多」→ 关闭再打开 → 两层都收起', async () => {
+    const deps = makeDeps(defaultRhythmPreset())
+    deps.getAdvancedExpanded = vi.fn(async () => true)
+    const panel = new TuningPanel(fakeElement() as unknown as HTMLElement, deps)
+    await flush()
+    const body = panel.generalBodyForTest as unknown as FakeEl
+    panel.open()
+    findByRole(body, 'summary-body.speed.primary')!.dispatch('click')
+    findByRole(body, 'more-toggle-body.speed.primary')!.dispatch('click')
+    expect(findByRole(body, 'detail-body.speed.primary')!.style.display).toBe('')
+    expect(findByRole(body, 'more-body.speed.primary')!.style.display).toBe('')
+
+    panel.close()
+    panel.open()
+
+    expect(findByRole(body, 'detail-body.speed.primary')!.style.display).toBe('none')
+    expect(findByRole(body, 'caret-body.speed.primary')!.textContent).toBe('▸')
+    expect(findByRole(body, 'more-body.speed.primary')!.style.display).toBe('none')
+    expect(findByRole(body, 'more-toggle-body.speed.primary')!.textContent).toBe('▸ 更多')
+    panel.dispose()
+  })
+
+  it('「高级调整」的展开态不受影响——那一层是明确要记忆并落盘的', async () => {
+    const deps = makeDeps(defaultRhythmPreset())
+    deps.getAdvancedExpanded = vi.fn(async () => true)
+    const panel = new TuningPanel(fakeElement() as unknown as HTMLElement, deps)
+    await flush()
+    const body = panel.generalBodyForTest as unknown as FakeEl
+    panel.open()
+    panel.close()
+    panel.open()
+
+    expect(findByRole(body, 'rule-rows')!.style.display).toBe('')
+    expect(findByRole(body, 'advanced-toggle-label')!.textContent).toBe('▾ 高级调整')
+    expect(deps.commitAdvancedExpanded).not.toHaveBeenCalled()
+    panel.dispose()
+  })
+})
+
+describe('开关行的命中区只有开关自身', () => {
+  it('点标签文字或 ⓘ 都不翻转开关——开关行被五个 tab 共用，整行可点会让「看一眼说明」变成静默改设置', async () => {
+    const deps = makeDeps(defaultRhythmPreset())
+    deps.getAdvancedExpanded = vi.fn(async () => true)
+    const panel = new TuningPanel(fakeElement() as unknown as HTMLElement, deps)
+    await flush()
+    const body = panel.generalBodyForTest as unknown as FakeEl
+    const row = findByRole(body, 'rule-enabled-body.speed.primary')!
+
+    // FakeEl 不模拟事件冒泡：直接对行派发，等效于真实浏览器里点在行内空白/标签上冒泡到行
+    row.dispatch('click', { target: row })
+    const icon = collectIcons(row)[0]
+    expect(icon, '「启用」行没有 ⓘ 图标，用例前提不成立').toBeTruthy()
+    row.dispatch('click', { target: icon })
+
+    expect(deps.commitMapping).not.toHaveBeenCalled()
+    expect(textOf(findByRole(body, 'summary-body.speed.primary')!)).not.toContain('已关')
+  })
+
+  it('点开关 track 才翻转', async () => {
+    const deps = makeDeps(defaultRhythmPreset())
+    deps.getAdvancedExpanded = vi.fn(async () => true)
+    const panel = new TuningPanel(fakeElement() as unknown as HTMLElement, deps)
+    await flush()
+    const body = panel.generalBodyForTest as unknown as FakeEl
+    trackIn(findByRole(body, 'rule-enabled-body.speed.primary')!).dispatch('click')
+    expect(textOf(findByRole(body, 'summary-body.speed.primary')!)).toContain('已关')
+  })
+})
+
+describe('播种顺序无关性：摘要基准不依赖三个 IPC 的解析先后', () => {
+  /** 多 flush 几轮 microtask——刻意延迟解析的播种要等更久才落地 */
+  async function flushDeep(): Promise<void> {
+    for (let i = 0; i < 12; i++) await Promise.resolve()
+  }
+
+  it('getMacroKnobs 最晚解析时，摘要行仍能浮出偏离值', async () => {
+    const deps = makeDeps(defaultRhythmPreset())
+    deps.getAdvancedExpanded = vi.fn(async () => true)
+    // 宏旋钮排在 mapping/形状/背景之后落地：若只靠别的播种回调顺手重铺，
+    // baselineById 会永久停在 null，「只浮出改过的参数」静默失效（摘要行永远只有来源名）
+    deps.getMacroKnobs = vi.fn(async () => {
+      for (let i = 0; i < 6; i++) await Promise.resolve()
+      return { ...DEFAULT_MACRO_KNOBS }
+    })
+    const panel = new TuningPanel(fakeElement() as unknown as HTMLElement, deps)
+    await flushDeep()
+
+    const body = panel.generalBodyForTest as unknown as FakeEl
+    const detail = findByRole(body, 'detail-body.speed.primary')!
+    const gain = rangesIn(detail)[0]
+    gain.value = '2.5'
+    gain.dispatch('change')
+    expect(textOf(findByRole(body, 'summary-body.speed.primary')!)).toContain('强 2.50')
+  })
+})
+
+describe('TuningPanel：撤销入口与回出厂', () => {
+  it('入口挂在高级调整折叠头那一行，折叠收起时也在', async () => {
+    const deps = makeDeps(defaultRhythmPreset())
+    const panel = new TuningPanel(fakeElement() as unknown as HTMLElement, deps)
+    await flush()
+    const body = panel.generalBodyForTest as unknown as FakeEl
+
+    const row = findByRole(body, 'advanced-toggle')!
+    expect(findByRole(row, 'factory-reset')).toBeTruthy()
+    // 收起态（getAdvancedExpanded 默认 false）下按钮仍在这一行里
+    expect(findByRole(body, 'rule-rows')!.style.display).toBe('none')
+  })
+
+  it('折叠头文案改写不会清掉同行的按钮——文案有独立节点承载', async () => {
+    const deps = makeDeps(defaultRhythmPreset())
+    const panel = new TuningPanel(fakeElement() as unknown as HTMLElement, deps)
+    await flush()
+    const body = panel.generalBodyForTest as unknown as FakeEl
+
+    const row = findByRole(body, 'advanced-toggle')!
+    row.dispatch('click') // 展开：会重写文案
+    expect(findByRole(body, 'advanced-toggle-label')!.textContent).toBe('▾ 高级调整')
+    expect(findByRole(row, 'factory-reset')).toBeTruthy()
+  })
+
+  it('点按钮不连带折叠整行（stopPropagation）', async () => {
+    const deps = makeDeps(defaultRhythmPreset())
+    const panel = new TuningPanel(fakeElement() as unknown as HTMLElement, deps)
+    await flush()
+    const body = panel.generalBodyForTest as unknown as FakeEl
+
+    findByRole(body, 'advanced-toggle')!.dispatch('click') // 先展开
+    expect(findByRole(body, 'rule-rows')!.style.display).toBe('')
+    deps.commitAdvancedExpanded.mockClear()
+
+    // 真实 DOM 里按钮的 click 会冒泡到整行；FakeEl 不冒泡，故显式模拟：
+    // 先触发按钮自己的监听，再触发整行的监听，验证整行监听被 stopPropagation 挡住
+    const e = { stopPropagation: vi.fn() }
+    findByRole(body, 'factory-reset')!.dispatch('click', e)
+    expect(e.stopPropagation).toHaveBeenCalled()
+    expect(findByRole(body, 'rule-rows')!.style.display).toBe('')
+    expect(deps.commitAdvancedExpanded).not.toHaveBeenCalled()
+  })
+
+  it('回出厂：旋钮归位 + 反应列表回官方基线，且清掉用户自加的反应', async () => {
+    const mapping = defaultRhythmPreset()
+    // 先手加一条用户反应（u- 前缀），并把旋钮拖离中点
+    mapping.reactions.push(makeReaction({ element: 'body', property: 'speed' }, mapping.reactions))
+    const deps = makeDeps(mapping)
+    const panel = new TuningPanel(fakeElement() as unknown as HTMLElement, deps)
+    await flush()
+    const body = panel.generalBodyForTest as unknown as FakeEl
+    const strength = rangeIn(findByRole(body, 'macro-knob-strength')!)
+    strength.value = '1'; strength.dispatch('change')
+
+    findByRole(body, 'factory-reset')!.dispatch('click')
+
+    expect(deps.commitMacroKnobs.mock.calls.at(-1)![0]).toEqual(DEFAULT_MACRO_KNOBS)
+    const committed = deps.commitMapping.mock.calls.at(-1)![0] as MappingValues
+    expect(committed).toEqual(defaultRhythmPreset())
+    expect(committed.reactions.some((r) => r.id.startsWith(USER_REACTION_PREFIX))).toBe(false)
+    // 两个 thumb 一起回中点（宏旋钮子树不重建，靠 macroKnobSyncs 显式回写）
+    for (const role of ['macro-knob-strength', 'macro-knob-response']) {
+      expect(rangeIn(findByRole(body, role)!).value, role).toBe('0.5')
+    }
+  })
+
+  it('旧「重置」入口已移除——语义被回出厂取代，不留两个近义按钮', async () => {
+    const deps = makeDeps(defaultRhythmPreset())
+    const panel = new TuningPanel(fakeElement() as unknown as HTMLElement, deps)
+    await flush()
+    const body = panel.generalBodyForTest as unknown as FakeEl
+    expect(findByRole(body, 'macro-reset')).toBeNull()
+  })
+})
+
+describe('TuningPanel：撤销/重做', () => {
+  it('改一个参数后撤销：commit 收到改前的值，滑块也跟着回去', async () => {
+    const deps = makeDeps(defaultRhythmPreset())
+    deps.getAdvancedExpanded = vi.fn(async () => true)
+    const panel = new TuningPanel(fakeElement() as unknown as HTMLElement, deps)
+    await flush()
+    const body = panel.generalBodyForTest as unknown as FakeEl
+    const before = ruleOf(defaultRhythmPreset(), 'body.speed.primary').gain
+
+    const slider = rangeIn(findByRole(body, 'rule-body.speed.primary')!)
+    slider.value = '3'; slider.dispatch('change')
+
+    findByRole(body, 'undo')!.dispatch('click')
+    const committed = deps.commitMapping.mock.calls.at(-1)![0] as MappingValues
+    expect(ruleOf(committed, 'body.speed.primary').gain).toBe(before)
+    expect(rangeIn(findByRole(body, 'rule-body.speed.primary')!).value).toBe(String(before))
+  })
+
+  it('撤销后重做：又回到改动后的值', async () => {
+    const deps = makeDeps(defaultRhythmPreset())
+    deps.getAdvancedExpanded = vi.fn(async () => true)
+    const panel = new TuningPanel(fakeElement() as unknown as HTMLElement, deps)
+    await flush()
+    const body = panel.generalBodyForTest as unknown as FakeEl
+
+    const slider = rangeIn(findByRole(body, 'rule-body.speed.primary')!)
+    slider.value = '3'; slider.dispatch('change')
+    findByRole(body, 'undo')!.dispatch('click')
+    findByRole(body, 'redo')!.dispatch('click')
+
+    const committed = deps.commitMapping.mock.calls.at(-1)![0] as MappingValues
+    expect(ruleOf(committed, 'body.speed.primary').gain).toBe(3)
+  })
+
+  it('没得退时撤销按钮置灰且点了没反应', async () => {
+    const deps = makeDeps(defaultRhythmPreset())
+    const panel = new TuningPanel(fakeElement() as unknown as HTMLElement, deps)
+    await flush()
+    const body = panel.generalBodyForTest as unknown as FakeEl
+
+    const undo = findByRole(body, 'undo')!
+    expect(undo.style.color).toContain('0.18')
+    expect(undo.style.cursor).toBe('default')
+    const before = deps.commitMapping.mock.calls.length
+    undo.dispatch('click')
+    expect(deps.commitMapping.mock.calls.length).toBe(before)
+  })
+
+  it('回出厂后按撤销：用户自加的反应完整回来', async () => {
+    const mapping = defaultRhythmPreset()
+    const mine = makeReaction({ element: 'body', property: 'speed' }, mapping.reactions)
+    mapping.reactions.push(mine)
+    const deps = makeDeps(mapping)
+    const panel = new TuningPanel(fakeElement() as unknown as HTMLElement, deps)
+    await flush()
+    const body = panel.generalBodyForTest as unknown as FakeEl
+
+    findByRole(body, 'factory-reset')!.dispatch('click')
+    expect((deps.commitMapping.mock.calls.at(-1)![0] as MappingValues)
+      .reactions.some((r) => r.id === mine.id)).toBe(false)
+
+    findByRole(body, 'undo')!.dispatch('click')
+    expect((deps.commitMapping.mock.calls.at(-1)![0] as MappingValues)
+      .reactions.some((r) => r.id === mine.id)).toBe(true)
+  })
+
+  it('撤销掉一条被展开的反应不炸——展开态按存活 id 恢复', async () => {
+    const mapping = defaultRhythmPreset()
+    const deps = makeDeps(mapping)
+    deps.getAdvancedExpanded = vi.fn(async () => true)
+    const panel = new TuningPanel(fakeElement() as unknown as HTMLElement, deps)
+    await flush()
+    const body = panel.generalBodyForTest as unknown as FakeEl
+
+    // 复制一条 → 副本自动展开 → 撤销把它撤掉
+    findByRole(body, 'summary-row-body.speed.primary')!.dispatch('click')
+    findByRole(body, 'copy-reaction-body.speed.primary')!.dispatch('click')
+    expect(() => findByRole(body, 'undo')!.dispatch('click')).not.toThrow()
+    expect((deps.commitMapping.mock.calls.at(-1)![0] as MappingValues)
+      .reactions.filter((r) => r.target.property === 'speed').length).toBe(1)
+  })
+
+  it('撤销恢复的那一步自己不再入栈——连按两次撤销不会在原地打转', async () => {
+    const deps = makeDeps(defaultRhythmPreset())
+    deps.getAdvancedExpanded = vi.fn(async () => true)
+    const panel = new TuningPanel(fakeElement() as unknown as HTMLElement, deps)
+    await flush()
+    const body = panel.generalBodyForTest as unknown as FakeEl
+
+    const slider = rangeIn(findByRole(body, 'rule-body.speed.primary')!)
+    slider.value = '2'; slider.dispatch('change')
+    slider.value = '4'; slider.dispatch('change')
+    // 两次改动不同值但同一控件，若在 2s 窗内会合并成一步 —— 一次撤销即回基线
+    findByRole(body, 'undo')!.dispatch('click')
+    const first = ruleOf(deps.commitMapping.mock.calls.at(-1)![0] as MappingValues, 'body.speed.primary').gain
+    expect(first).toBe(ruleOf(defaultRhythmPreset(), 'body.speed.primary').gain)
+    // 已到底：再点无效，值不变
+    findByRole(body, 'undo')!.dispatch('click')
+    expect(ruleOf(deps.commitMapping.mock.calls.at(-1)![0] as MappingValues, 'body.speed.primary').gain).toBe(first)
+  })
+
+  it('宏旋钮拖动也进栈：撤销回到拖之前的旋钮位置', async () => {
+    const deps = makeDeps(defaultRhythmPreset())
+    const panel = new TuningPanel(fakeElement() as unknown as HTMLElement, deps)
+    await flush()
+    const body = panel.generalBodyForTest as unknown as FakeEl
+
+    const strength = rangeIn(findByRole(body, 'macro-knob-strength')!)
+    strength.value = '1'; strength.dispatch('change')
+    findByRole(body, 'undo')!.dispatch('click')
+
+    expect(deps.commitMacroKnobs.mock.calls.at(-1)![0]).toEqual(DEFAULT_MACRO_KNOBS)
+    expect(rangeIn(findByRole(body, 'macro-knob-strength')!).value).toBe('0.5')
+  })
+
+  it('切风格档后撤销一次即回均衡', async () => {
+    const deps = makeDeps(defaultRhythmPreset())
+    const panel = new TuningPanel(fakeElement() as unknown as HTMLElement, deps)
+    await flush()
+    const body = panel.generalBodyForTest as unknown as FakeEl
+    findByRole(body, 'macro-style-rhythmic')!.dispatch('click')
+    expect((deps.commitMacroKnobs.mock.calls.at(-1)![0] as MacroKnobs).style).toBe('rhythmic')
+    findByRole(body, 'undo')!.dispatch('click')
+    expect((deps.commitMacroKnobs.mock.calls.at(-1)![0] as MacroKnobs).style).toBe('balanced')
+  })
+})
+
+describe('TuningPanel：撤销快捷键', () => {
+  /** 触发 document 上注册的 keydown 监听（FakeEl 桩不冒泡，直接调 docListeners） */
+  function pressUndo(opts: { shift?: boolean } = {}): { preventDefault: ReturnType<typeof vi.fn> } {
+    const e = { key: 'z', metaKey: true, ctrlKey: false, shiftKey: !!opts.shift, preventDefault: vi.fn() }
+    for (const cb of docListeners['keydown'] ?? []) cb(e)
+    return e
+  }
+
+  it('面板开着且在律动页时，Cmd+Z 撤销、Shift+Cmd+Z 重做', async () => {
+    const deps = makeDeps(defaultRhythmPreset())
+    deps.getAdvancedExpanded = vi.fn(async () => true)
+    const panel = new TuningPanel(fakeElement() as unknown as HTMLElement, deps)
+    await flush()
+    panel.open()
+    const body = panel.generalBodyForTest as unknown as FakeEl
+    const base = ruleOf(defaultRhythmPreset(), 'body.speed.primary').gain
+
+    const slider = rangeIn(findByRole(body, 'rule-body.speed.primary')!)
+    slider.value = '3'; slider.dispatch('change')
+
+    const e = pressUndo()
+    expect(e.preventDefault).toHaveBeenCalled()
+    expect(ruleOf(deps.commitMapping.mock.calls.at(-1)![0] as MappingValues, 'body.speed.primary').gain).toBe(base)
+
+    pressUndo({ shift: true })
+    expect(ruleOf(deps.commitMapping.mock.calls.at(-1)![0] as MappingValues, 'body.speed.primary').gain).toBe(3)
+    panel.dispose()
+  })
+
+  it('面板关着时不拦截 Cmd+Z——别的地方还要用这个组合键', async () => {
+    const deps = makeDeps(defaultRhythmPreset())
+    deps.getAdvancedExpanded = vi.fn(async () => true)
+    const panel = new TuningPanel(fakeElement() as unknown as HTMLElement, deps)
+    await flush()
+    panel.open()
+    const body = panel.generalBodyForTest as unknown as FakeEl
+    const slider = rangeIn(findByRole(body, 'rule-body.speed.primary')!)
+    slider.value = '3'; slider.dispatch('change')
+    panel.close()
+
+    const e = pressUndo()
+    expect(e.preventDefault).not.toHaveBeenCalled()
+    expect(ruleOf(deps.commitMapping.mock.calls.at(-1)![0] as MappingValues, 'body.speed.primary').gain).toBe(3)
+    panel.dispose()
+  })
+
+  it('不在律动页时不拦截——撤销只管律动页，在镜头页按下去不该悄悄改律动配置', async () => {
+    const deps = makeDeps(defaultRhythmPreset())
+    deps.getAdvancedExpanded = vi.fn(async () => true)
+    const panel = new TuningPanel(fakeElement() as unknown as HTMLElement, deps)
+    await flush()
+    panel.open()
+    const body = panel.generalBodyForTest as unknown as FakeEl
+    const slider = rangeIn(findByRole(body, 'rule-body.speed.primary')!)
+    slider.value = '3'; slider.dispatch('change')
+    panel.openToTab('camera')
+
+    const e = pressUndo()
+    expect(e.preventDefault).not.toHaveBeenCalled()
+    expect(ruleOf(deps.commitMapping.mock.calls.at(-1)![0] as MappingValues, 'body.speed.primary').gain).toBe(3)
+    panel.dispose()
+  })
+
+  it('dispose 后卸掉监听，不留野回调', async () => {
+    const deps = makeDeps(defaultRhythmPreset())
+    const panel = new TuningPanel(fakeElement() as unknown as HTMLElement, deps)
+    await flush()
+    const before = (docListeners['keydown'] ?? []).length
+    panel.dispose()
+    expect((docListeners['keydown'] ?? []).length).toBe(before - 1)
   })
 })

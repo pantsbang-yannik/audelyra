@@ -3,12 +3,14 @@
 // 跟手只缩放主导的响应快慢。均衡档 + 两旋钮居中恒等于默认预设。
 // 劲儿走对比度而非全体放大：curves.softLimit 的 CAP=1.25 会把放大吃掉大半（gain 1→2 仅涨 25%），
 // 而压低背景不受任何天花板限制，动态范围才是观感差异的真正来源。
-import { defaultRhythmPreset, GAIN_MAX, SMOOTHING_MAX_MS } from './spec'
-import { VISUAL_TARGETS, type AudioFeature, type MappingCurve, type MappingRule, type MappingValues, type VisualTarget } from './types'
+import { defaultRhythmPreset, isPresetReaction, GAIN_MAX, SMOOTHING_MAX_MS } from './spec'
+import type { AudioFeature, BodyProperty, MappingCurve, MappingValues, Reaction } from './types'
 
 export type MacroStyle = 'balanced' | 'rhythmic' | 'ambient' | 'bass'
 export type RuleSlot = 'primary' | 'secondary'
-export type RuleKey = `${VisualTarget}.${RuleSlot}`
+/** 宏旋钮只认领**主体**的官方基线反应 id。背景显影等其余反应一律中立、不受旋钮影响——
+ * 三个旋钮（风格/劲儿/跟手）的语义都是「主体律动」，扩到背景会让「劲儿」变成看不懂的全局开关。 */
+export type RuleKey = `body.${BodyProperty}.${RuleSlot}`
 /** 规则在某风格里承担的角色：主导承载风格特征、背景被压以突出主导、中立不受劲儿缩放 */
 export type RuleRole = 'lead' | 'background' | 'neutral'
 
@@ -34,54 +36,51 @@ const STYLE_DEFS: Record<MacroStyle, StyleDef> = {
   // 均衡＝现行默认预设，一字不改；老用户升级后观感不变
   balanced: {
     overrides: {},
-    lead: ['space.primary', 'brightness.primary'],
-    background: ['space.secondary', 'brightness.secondary'],
+    lead: ['body.space.primary', 'body.brightness.primary'],
+    background: ['body.space.secondary', 'body.brightness.secondary'],
   },
   // 节奏：空间/亮度靠 primary 的 beat 冲量咬拍，其余规则用「连续量 + 快响应 + punch」逼近顿挫感。
   // 脉冲源（beat/downbeat/drop）只在 space.primary / brightness.primary 有效——其余槽位走
   // EnvelopeFollower，单帧脉冲的响应系数仅 1-exp(-dt/tau)（tau=200ms 时 0.08），会被吃干净。
   rhythmic: {
     overrides: {
-      'space.secondary': { curve: 'punch', smoothingMs: 200 },
-      'density.primary': { curve: 'punch', smoothingMs: 200 },
-      'speed.primary': { source: 'energy', curve: 'punch', smoothingMs: 200 },
+      'body.space.secondary': { curve: 'punch', smoothingMs: 200 },
+      'body.density.primary': { curve: 'punch', smoothingMs: 200 },
+      'body.speed.primary': { source: 'energy', curve: 'punch', smoothingMs: 200 },
     },
-    lead: ['space.primary', 'brightness.primary', 'speed.primary', 'thickness.primary'],
-    background: ['space.secondary', 'brightness.secondary'],
+    lead: ['body.space.primary', 'body.brightness.primary', 'body.speed.primary', 'body.thickness.primary'],
+    background: ['body.space.secondary', 'body.brightness.secondary'],
   },
   // 氛围：全身跟响度与能量的连续起伏，无脉冲尖峰 → 连绵呼吸
   ambient: {
     overrides: {
-      'space.primary': { source: 'energy', curve: 'ease', smoothingMs: 300 },
-      'space.secondary': { smoothingMs: 800 },
-      'brightness.primary': { source: 'loudness', curve: 'ease', smoothingMs: 250 },
-      'brightness.secondary': { smoothingMs: 150 },
-      'density.primary': { smoothingMs: 700 },
-      'thickness.primary': { source: 'energy', curve: 'ease', smoothingMs: 300 },
-      'speed.primary': { source: 'loudness', curve: 'linear', smoothingMs: 600 },
+      'body.space.primary': { source: 'energy', curve: 'ease', smoothingMs: 300 },
+      'body.space.secondary': { smoothingMs: 800 },
+      'body.brightness.primary': { source: 'loudness', curve: 'ease', smoothingMs: 250 },
+      'body.brightness.secondary': { smoothingMs: 150 },
+      'body.density.primary': { smoothingMs: 700 },
+      'body.thickness.primary': { source: 'energy', curve: 'ease', smoothingMs: 300 },
+      'body.speed.primary': { source: 'loudness', curve: 'linear', smoothingMs: 600 },
     },
-    lead: ['space.primary', 'brightness.primary', 'speed.primary', 'thickness.primary'],
-    background: ['space.secondary', 'brightness.secondary'],
+    lead: ['body.space.primary', 'body.brightness.primary', 'body.speed.primary', 'body.thickness.primary'],
+    background: ['body.space.secondary', 'body.brightness.secondary'],
   },
   // 低音：空间与厚度跟低频泵动，其余跟能量（亮度/密度/速度的白名单里没有 low）
   bass: {
     overrides: {
-      'space.primary': { source: 'low', curve: 'punch', smoothingMs: 120 },
-      'brightness.primary': { source: 'energy', curve: 'ease', smoothingMs: 200 },
-      'thickness.primary': { curve: 'punch' },
-      'speed.primary': { source: 'energy', curve: 'linear', smoothingMs: 600 },
+      'body.space.primary': { source: 'low', curve: 'punch', smoothingMs: 120 },
+      'body.brightness.primary': { source: 'energy', curve: 'ease', smoothingMs: 200 },
+      'body.thickness.primary': { curve: 'punch' },
+      'body.speed.primary': { source: 'energy', curve: 'linear', smoothingMs: 600 },
     },
-    lead: ['space.primary', 'thickness.primary', 'brightness.primary', 'speed.primary'],
-    background: ['space.secondary', 'brightness.secondary'],
+    lead: ['body.space.primary', 'body.thickness.primary', 'body.brightness.primary', 'body.speed.primary'],
+    background: ['body.space.secondary', 'body.brightness.secondary'],
   },
 }
 
-/** 按 key 取规则；key 指向不存在的槽位（如 density.secondary）返回 null */
-function ruleAt(m: MappingValues, key: RuleKey): MappingRule | null {
-  const [t, slot] = key.split('.') as [VisualTarget, RuleSlot]
-  const tm = m.targets[t]
-  if (!tm) return null
-  return slot === 'primary' ? tm.primary : (tm.secondary ?? null)
+/** 按 id 取官方基线反应；不存在（如 density.secondary，或被用户删掉了）返回 null */
+function ruleAt(m: MappingValues, key: RuleKey): Reaction | null {
+  return m.reactions.find((r) => r.id === key) ?? null
 }
 
 /** 风格基线：默认预设套上该档的 source/curve/smoothing 覆盖。均衡档返回值深度等于 defaultRhythmPreset() */
@@ -156,24 +155,42 @@ const rangeFactor = (v: number, min: number, max: number): number =>
 const bgFactor = (s: number): number =>
   s <= 0.5 ? 1 : 1 + (BG_GAIN_MIN - 1) * ((s - 0.5) / 0.5)
 
-export function macroToMapping(k: MacroKnobs): MappingValues {
-  const out = styleBaseline(k.style)
+/** 宏旋钮投影。
+ *
+ * `current` 决定「重铺哪些反应」——反应可增删之后，这个参数不是可选优化而是防数据丢失的必需品：
+ * - 传了 current（调音台实际应用旋钮时）：**只重铺 current 里仍存在的官方基线反应**，
+ *   用户手加的反应（`u-` 前缀）原样保留、位置不变；用户删掉的官方反应也不复活。
+ *   没有这一条，拖一下旋钮就会把用户写的反应全删了。
+ * - 不传 current（判定「专业表是否已被手改」时）：返回完整基线，
+ *   于是「加了一条反应」「删了一条基线反应」都会被判为已手改——这是诚实的，
+ *   旋钮位置确实不再能完整描述当前画面。
+ */
+export function macroToMapping(k: MacroKnobs, current?: MappingValues): MappingValues {
+  const baseline = styleBaseline(k.style)
   const leadGain = rangeFactor(k.strength, LEAD_GAIN_MIN, LEAD_GAIN_MAX)
   const backGain = bgFactor(k.strength)
   const leadSmooth = rangeFactor(k.response, RESPONSE_MIN, RESPONSE_MAX)
 
-  for (const t of VISUAL_TARGETS) {
-    for (const slot of ['primary', 'secondary'] as const) {
-      const key = `${t}.${slot}` as RuleKey
-      const rule = ruleAt(out, key)
-      if (!rule) continue
-      const role = roleOf(k.style, key)
-      // 中立规则（如 density）两项都不缩放：density 决定画面「有多少东西」，压低会让画面空掉
-      const g = role === 'lead' ? leadGain : role === 'background' ? backGain : 1
-      const s = role === 'lead' ? leadSmooth : 1
-      rule.gain = clamp(rule.gain * g, 0, GAIN_MAX)
-      rule.smoothingMs = clamp(rule.smoothingMs * s, 0, SMOOTHING_MAX_MS)
+  const projected = (r: Reaction): Reaction => {
+    const role = roleOf(k.style, r.id as RuleKey)
+    // 中立规则（如 density、背景显影）两项都不缩放：density 决定画面「有多少东西」，压低会让画面空掉
+    const g = role === 'lead' ? leadGain : role === 'background' ? backGain : 1
+    const s = role === 'lead' ? leadSmooth : 1
+    return {
+      ...r,
+      gain: clamp(r.gain * g, 0, GAIN_MAX),
+      smoothingMs: clamp(r.smoothingMs * s, 0, SMOOTHING_MAX_MS),
     }
   }
-  return out
+
+  if (!current) return { version: 2, reactions: baseline.reactions.map(projected) }
+
+  return {
+    version: 2,
+    reactions: current.reactions.map((r) => {
+      if (!isPresetReaction(r.id)) return r // 用户手加的：原样保留，旋钮不碰
+      const base = ruleAt(baseline, r.id as RuleKey)
+      return base ? projected(base) : r // 基线里没有这个 id（不该发生）：保守保留原值
+    }),
+  }
 }

@@ -91,6 +91,19 @@ export class SignalRig {
     this.drop.trigger(strength)
   }
 
+  /** 频段归一峰值的快照 / 恢复：**信号源切换（如进出试音）时必须成对调用**。
+   * 与 mapper.snapshotBandPeaks 同理——半衰期 30s 的自适应状态会跨源残留极久，
+   * 不隔离则试音的定标会压低退出后安静歌曲的反应，反之历史响歌也会让 pad 响应打折。 */
+  snapshotBandPeaks(): [number, number, number] {
+    return [this.lowNorm.peak, this.midNorm.peak, this.highNorm.peak]
+  }
+
+  restoreBandPeaks([low, mid, high]: [number, number, number]): void {
+    this.lowNorm.setPeak(low)
+    this.midNorm.setPeak(mid)
+    this.highNorm.setPeak(high)
+  }
+
   update(dt: number, s: Signals | null): number {
     const drive = this.drive.update(s?.loudness.smooth ?? 0, dt)
     this.u.uDrive.value = drive

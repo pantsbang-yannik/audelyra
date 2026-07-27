@@ -23,6 +23,8 @@ export class SceneHost {
   private lastUiFocus: { v: number; profile: UiFocusProfile } = { v: 0, profile: 'full' }
   private lastInteractive = true
   private lastMapping: MappingValues | null = null
+  /** 试音态（换场景后重放，见 setAuditionActive）；null = 不在试音中 */
+  private auditionState: { resetPeaks?: [number, number, number] } | null = null
   private lastShape: ShapeSettings | null = null
   private lastMotion: MotionSettings | null = null
   private lastCamera: CameraSettings | null = null
@@ -97,6 +99,9 @@ export class SceneHost {
     if (this.lastLyrics) this.scene.applyLyrics?.(this.lastLyrics)
     if (this.lastBackground) this.scene.applyBackground?.(this.lastBackground)
     if (this.lastGalaxy) this.scene.applyGalaxy?.(this.lastGalaxy)
+    // 试音态必须重放：新场景据此建立自己的「进入前快照」，否则退出时无从还原、
+    // 试音的定标会继续压制真实歌曲（换画质档位会走到这里重建场景）
+    if (this.auditionState) this.scene.setAuditionActive?.(true, this.auditionState.resetPeaks)
     // 重放走队列（终审复核残留）：若直调 onProgress，随后首帧消费 pendingTrack 时 onTrackChange
     // 的 clock.reset() 会把这个刚 mark 的基准抹掉——排进队列借帧循环既定顺序（track 先 progress 后），
     // 首帧 onTrackChange 清场后才 mark，重建不失基准
@@ -179,6 +184,20 @@ export class SceneHost {
   applyLyrics(s: LyricsSettings): void {
     this.lastLyrics = s
     this.scene?.applyLyrics?.(s)
+  }
+
+  /** 试音模式进出转发（信号源切换时隔离场景侧自适应状态，见 Scene.setAuditionActive）。
+   * **必须记忆并在换场景后重放**：试音期间用户仍可改画质档位而触发 Scene 重建，
+   * 新场景若不知道自己身处试音中，就没有「进入前快照」，退出时无从还原，
+   * 试音的定标会继续压制真实歌曲。 */
+  setAuditionActive(active: boolean, resetPeaks?: [number, number, number]): void {
+    this.auditionState = active ? { resetPeaks } : null
+    this.scene?.setAuditionActive?.(active, resetPeaks)
+  }
+
+  /** 星系是否已完全退出（未实现该钩子的场景视为恒 true，不阻塞模式切换） */
+  isGalaxyIdle(): boolean {
+    return this.scene?.isGalaxyIdle?.() ?? true
   }
 
   applyBackground(b: BackgroundSettings): void {

@@ -75,3 +75,31 @@ describe('SignalBus 事件折叠（takeFrame）', () => {
     expect(bus.takeFrame()).toBeNull()
   })
 })
+
+describe('clearFrame（信号源切换）', () => {
+  it('清掉最后一帧：takeFrame 回到 null，画面据此进沉睡而非停在上一路的「有声」态', () => {
+    const bus = new SignalBus()
+    bus.publish(mkSignal({ silence: false }))
+    expect(bus.takeFrame()).not.toBeNull()
+    bus.clearFrame()
+    expect(bus.takeFrame(), '不清则上一路的 silence:false 会一直留在画面').toBeNull()
+    expect(bus.latest).toBeNull()
+  })
+
+  it('清掉未消费的折叠事件：不清则会折叠进下一路首帧，凭空多一次假鼓点', () => {
+    const bus = new SignalBus()
+    bus.publish(mkSignal({ beat: { onBeat: true, strength: 1 }, drop: true }))
+    bus.clearFrame()
+    bus.publish(mkSignal()) // 新信号源的首帧：本身无脉冲
+    const f = bus.takeFrame()!
+    expect(f.beat.onBeat, '上一路的 onBeat 不许漏到新源首帧').toBe(false)
+    expect(f.beat.strength).toBe(0)
+    expect(f.drop).toBe(false)
+  })
+
+  it('空 bus 上调用是安全的（幂等）', () => {
+    const bus = new SignalBus()
+    expect(() => { bus.clearFrame(); bus.clearFrame() }).not.toThrow()
+    expect(bus.takeFrame()).toBeNull()
+  })
+})

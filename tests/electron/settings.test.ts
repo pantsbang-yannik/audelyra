@@ -82,10 +82,11 @@ describe('settings.mapping 持久化', () => {
     const s = sanitizeSettings({ tier: 'auto' })
     expect(s.mapping).toEqual(defaultRhythmPreset())
   })
-  it('非法 mapping 被 sanitize（非法 source 回退）', () => {
+  it('非法 mapping 被 sanitize（老 version 1 存档迁移 + 非法 source 回退）', () => {
     const raw = { ...DEFAULT_SETTINGS, mapping: { version: 1, targets: { thickness: { primary: { source: 'high' } } } } }
     const s = sanitizeSettings(raw)
-    expect(s.mapping.targets.thickness.primary.source).toBe('low')
+    expect(s.mapping.version).toBe(2)
+    expect(s.mapping.reactions.find((r) => r.id === 'body.thickness.primary')!.source).toBe('low')
   })
 })
 

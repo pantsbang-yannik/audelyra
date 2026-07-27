@@ -71,13 +71,15 @@ function makeDeps(): DockDeps & {
   snapPoster: ReturnType<typeof vi.fn>
   snapClip: ReturnType<typeof vi.fn>
   openLocalFile: ReturnType<typeof vi.fn>
+  toggleAudition: ReturnType<typeof vi.fn>
 } {
   return {
     toggleTuning: vi.fn(() => {}),
     toggleShapes: vi.fn(() => {}),
     snapPoster: vi.fn(() => {}),
     snapClip: vi.fn(() => {}),
-    openLocalFile: vi.fn(() => {})
+    openLocalFile: vi.fn(() => {}),
+    toggleAudition: vi.fn(() => {})
   }
 }
 
@@ -93,7 +95,7 @@ function buttonsByTitle(): Record<string, FakeEl> {
   return map
 }
 
-describe('ControlDock（悬停显影的界面内图标操作入口，两态下恒为 [形状,调音台|海报,回放|本地]）', () => {
+describe('ControlDock（悬停显影的界面内图标操作入口，两态下恒为 [形状,调音台,试音|海报,回放|本地]）', () => {
   it('fullscreen 态：poke 后显影，设置/星系图鉴已迁出（含调音台/形状两钮，无全屏钮，已迁至右上角 CornerCluster）', () => {
     const dock = new ControlDock(fakeElement() as unknown as HTMLElement, makeDeps())
     dock.setMode('fullscreen')
@@ -169,7 +171,7 @@ describe('ControlDock（悬停显影的界面内图标操作入口，两态下�
       tip?.remove()
       return text
     })
-    expect(titles).toEqual(['形状 / 背景', '调音台', '星图海报', 'Drop 回放', '本地播放']) // 三组：布置｜快门｜内容（性质分区，主界面布局重组）
+    expect(titles).toEqual(['形状 / 背景', '调音台', '试音', '星图海报', 'Drop 回放', '本地播放']) // 三组：布置｜快门｜内容（性质分区，主界面布局重组）
     buttons[0].dispatch('click')
     expect(deps.toggleShapes).toHaveBeenCalledTimes(1)
     dock.dispose()
@@ -185,13 +187,26 @@ describe('ControlDock（悬停显影的界面内图标操作入口，两态下�
     dock.dispose()
   })
 
-  it('三组结构：容器 children = [布置(2), 快门(2), 内容(1)]，组间靠容器 gap 34px', () => {
+  it('三组结构：容器 children = [布置(3), 快门(2), 内容(1)]，组间靠容器 gap 34px', () => {
     const dock = new ControlDock(fakeElement() as unknown as HTMLElement, makeDeps())
     dock.setMode('windowed')
     const container = created[0]
     expect(container.children.length).toBe(3)
-    expect(container.children.map((g) => g.children.length)).toEqual([2, 2, 1])
+    // 布置组 3 枚：形状 + 调音台 + 试音——试音按「用户目的」跟调音台成一条工作流（调 + 试），
+    // 不按技术实现归到「换信号源」那组
+    expect(container.children.map((g) => g.children.length)).toEqual([3, 2, 1])
     expect(container.style.cssText).toContain('gap: 34px')
+    dock.dispose()
+  })
+
+  it('试音图标：点击转发 toggleAudition（显影 V0 试音模式入口）', () => {
+    const deps = makeDeps()
+    const dock = new ControlDock(fakeElement() as unknown as HTMLElement, deps)
+    dock.setMode('windowed')
+    const btns = buttonsByTitle()
+    expect(btns['试音']).toBeTruthy()
+    btns['试音'].dispatch('click')
+    expect(deps.toggleAudition).toHaveBeenCalledTimes(1)
     dock.dispose()
   })
 
@@ -207,7 +222,7 @@ describe('ControlDock（悬停显影的界面内图标操作入口，两态下�
       return pair
     })
     expect(pairs).toEqual([
-      ['形状 / 背景', '⌘⇧S'], ['调音台', '⌘⇧T'],
+      ['形状 / 背景', '⌘⇧S'], ['调音台', '⌘⇧T'], ['试音', ''],
       ['星图海报', '⌘⇧P'], ['Drop 回放', '⌘⇧R'],
       ['本地播放', '']
     ])

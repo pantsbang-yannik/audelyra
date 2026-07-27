@@ -1,11 +1,13 @@
 import { TraceRecorder, TracePlayer } from '../../engine/trace'
 import type { SignalBus } from '../../engine/bus'
 
+/** @returns stopReplay——供装配层在抢占 bus 直灌权时停掉正在回放的 trace
+ * （trace 与试音都直接 publish，同时活跃会逐帧竞态） */
 export function installTraceControls(opts: {
   bus: SignalBus
   onReplayStart: () => void
   onReplayEnd: () => void
-}): void {
+}): { stopReplay: () => void } {
   const recorder = new TraceRecorder()
   let recording = false
   let rafId = 0
@@ -57,4 +59,6 @@ export function installTraceControls(opts: {
     }
     rafId = requestAnimationFrame(tick)
   })
+
+  return { stopReplay }
 }

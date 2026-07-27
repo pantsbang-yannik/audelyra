@@ -57,6 +57,32 @@ export function backdropBrightness(p: { opacity: number; breathe: boolean; energ
   return p.opacity * breath * (1 - p.sleep * 0.35) * p.fade
 }
 
+/** 显影（B1）在 develop=0 时保留的底：**不取 0**。
+ * 设计稿 §十一红线——背景承载的是记忆（动漫写真、live 照片），认不出来价值就没了。
+ * 于是「未显影态」是去色压暗的可辨认画面，不是全黑。 */
+export const DEVELOP_SAT_FLOOR = 0.3
+export const DEVELOP_BRIGHT_FLOOR = 0.6
+
+/** 背景的音乐调制量（mapper 的 backdrop 三属性）。三者静止值均为 1 = 完全不调制，
+ * 于是没写背景反应的用户拿到与改造前逐像素相同的画面。 */
+export interface BackdropReaction {
+  develop: number
+  brightness: number
+  saturation: number
+}
+
+export const IDLE_BACKDROP_REACTION: BackdropReaction = { develop: 1, brightness: 1, saturation: 1 }
+
+/** 反应 → 饱和/亮度两个乘性因子（纯函数，便于断言全行程可感）。
+ * develop 同时压饱和与亮度（「显影」是一件事，不是两个滑块）；另两个属性各自独立乘上去。 */
+export function backdropModulation(r: BackdropReaction): { sat: number; bright: number } {
+  const d = Math.max(0, Math.min(1, r.develop))
+  return {
+    sat: (DEVELOP_SAT_FLOOR + (1 - DEVELOP_SAT_FLOOR) * d) * Math.max(0, r.saturation),
+    bright: (DEVELOP_BRIGHT_FLOOR + (1 - DEVELOP_BRIGHT_FLOOR) * d) * Math.max(0, r.brightness),
+  }
+}
+
 export class UserBackdrop {
   readonly mesh: THREE.Mesh
   private readonly geo = new THREE.PlaneGeometry(1, 1)
@@ -194,9 +220,13 @@ export class UserBackdrop {
     this.video = null
   }
 
-  /** 每帧：追踪相机撑满视野 + cover 裁切 uniform + 亮度合成（透明度×呼吸×沉睡压暗×淡入，公式见 backdropBrightness） */
+  /** 每帧：追踪相机撑满视野 + cover 裁切 uniform + 亮度合成（透明度×呼吸×沉睡压暗×淡入，公式见 backdropBrightness）
+   * + 音乐调制（B1 显影，公式见 backdropModulation）。
+   * 用户的静态设置（bgSaturation/bgOpacity）是**基准**，反应是乘在其上的**调制**——不是覆盖，
+   * 否则把饱和度拉到 0 的用户会因为一条背景反应又看到彩色，静态控件变成死件。 */
   update(dt: number, camera: THREE.PerspectiveCamera,
-    s: { energy: number; sleep: number; opacity: number; saturation: number; breathe: boolean }): void {
+    s: { energy: number; sleep: number; opacity: number; saturation: number; breathe: boolean },
+    reaction: BackdropReaction = IDLE_BACKDROP_REACTION): void {
     if (!this.mesh.visible) return
     camera.getWorldDirection(DIR)
     this.mesh.position.copy(camera.position).addScaledVector(DIR, BACKDROP_DIST)
@@ -207,8 +237,10 @@ export class UserBackdrop {
     this.uUvScale.value.set(c.sx, c.sy)
     this.uUvOffset.value.set(c.ox, c.oy)
     this.fade = Math.min(1, this.fade + dt / FADE_SEC)
-    this.uSat.value = s.saturation
-    this.uBright.value = backdropBrightness({ opacity: s.opacity, breathe: s.breathe, energy: s.energy, sleep: s.sleep, fade: this.fade })
+    const mod = backdropModulation(reaction)
+    this.uSat.value = s.saturation * mod.sat
+    this.uBright.value = mod.bright
+      * backdropBrightness({ opacity: s.opacity, breathe: s.breathe, energy: s.energy, sleep: s.sleep, fade: this.fade })
   }
 
   /** 背景主色调（#背景取色 ②）：调用侧（index.ts applyBackgroundSource）读它驱动调色总线；

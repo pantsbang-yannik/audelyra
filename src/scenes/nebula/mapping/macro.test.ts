@@ -3,18 +3,10 @@ import {
   macroToMapping, sanitizeMacroKnobs, DEFAULT_MACRO_KNOBS,
   styleBaseline, roleOf, MACRO_STYLES, type MacroStyle, type RuleKey,
 } from './macro'
-import { defaultRhythmPreset, sanitizeMappingValues, GAIN_MAX, SMOOTHING_MAX_MS } from './spec'
-import { VISUAL_TARGETS, type MappingRule } from './types'
+import { defaultRhythmPreset, makeReaction, sanitizeMappingValues, GAIN_MAX, SMOOTHING_MAX_MS } from './spec'
+import { BODY_PROPERTIES, type MappingValues, type Reaction } from './types'
 
-// 遍历一套 mapping 的全部规则（primary + 可选 secondary）
-function allRules(m: ReturnType<typeof defaultRhythmPreset>): MappingRule[] {
-  const out: MappingRule[] = []
-  for (const t of VISUAL_TARGETS) {
-    out.push(m.targets[t].primary)
-    if (m.targets[t].secondary) out.push(m.targets[t].secondary!)
-  }
-  return out
-}
+const allRules = (m: MappingValues): Reaction[] => m.reactions
 
 describe('macroToMapping（宏旋钮→专业表投影）', () => {
   it('中点不变量：均衡档 + 两旋钮 0.5 → 深度等于 defaultRhythmPreset', () => {
@@ -32,49 +24,90 @@ describe('macroToMapping（宏旋钮→专业表投影）', () => {
     const wild = macroToMapping({ style: 'rhythmic', strength: 1, response: 0.5 })
     const calm = macroToMapping({ style: 'rhythmic', strength: 0, response: 0.5 })
     // 节奏档：space.primary=主导，space.secondary=背景
-    expect(wild.targets.space.primary.gain / wild.targets.space.secondary!.gain)
+    expect(ruleOf(wild, 'body.space.primary')!.gain / ruleOf(wild, 'body.space.secondary')!.gain)
       .toBeGreaterThanOrEqual(5)
-    expect(mid.targets.space.primary.gain).toBe(mid.targets.space.secondary!.gain) // 中点无对比
-    expect(calm.targets.space.primary.gain).toBeLessThan(mid.targets.space.primary.gain * 0.8)
+    expect(ruleOf(mid, 'body.space.primary')!.gain).toBe(ruleOf(mid, 'body.space.secondary')!.gain) // 中点无对比
+    expect(ruleOf(calm, 'body.space.primary')!.gain).toBeLessThan(ruleOf(mid, 'body.space.primary')!.gain * 0.8)
   })
 
   it('劲儿不压中立规则：density 的 gain 在两端都不变', () => {
     const wild = macroToMapping({ style: 'rhythmic', strength: 1, response: 0.5 })
     const calm = macroToMapping({ style: 'rhythmic', strength: 0, response: 0.5 })
     const base = macroToMapping({ style: 'rhythmic', strength: 0.5, response: 0.5 })
-    expect(wild.targets.density.primary.gain).toBe(base.targets.density.primary.gain)
-    expect(calm.targets.density.primary.gain).toBe(base.targets.density.primary.gain)
+    expect(ruleOf(wild, 'body.density.primary')!.gain).toBe(ruleOf(base, 'body.density.primary')!.gain)
+    expect(ruleOf(calm, 'body.density.primary')!.gain).toBe(ruleOf(base, 'body.density.primary')!.gain)
   })
 
   it('跟手只缩放主导：主导 smoothing 两端跨度 ≥ 10 倍，背景两端相等', () => {
     const lo = macroToMapping({ style: 'rhythmic', strength: 0.5, response: 0 })
     const hi = macroToMapping({ style: 'rhythmic', strength: 0.5, response: 1 })
-    expect(hi.targets.space.primary.smoothingMs / lo.targets.space.primary.smoothingMs)
+    expect(ruleOf(hi, 'body.space.primary')!.smoothingMs / ruleOf(lo, 'body.space.primary')!.smoothingMs)
       .toBeGreaterThanOrEqual(10)
     // 背景规则的响应不随跟手变（保持稳定底，避免整体一起变慢＝换风格看不出差别）
-    expect(hi.targets.space.secondary!.smoothingMs).toBe(lo.targets.space.secondary!.smoothingMs)
+    expect(ruleOf(hi, 'body.space.secondary')!.smoothingMs).toBe(ruleOf(lo, 'body.space.secondary')!.smoothingMs)
   })
 
   it('正交-劲儿：只动劲儿，所有 smoothing 不变', () => {
     const base = macroToMapping({ style: 'rhythmic', strength: 0.5, response: 0.5 })
     const moved = macroToMapping({ style: 'rhythmic', strength: 0.9, response: 0.5 })
-    for (const t of VISUAL_TARGETS) {
-      expect(moved.targets[t].primary.smoothingMs).toBe(base.targets[t].primary.smoothingMs)
-      if (base.targets[t].secondary) {
-        expect(moved.targets[t].secondary!.smoothingMs).toBe(base.targets[t].secondary!.smoothingMs)
-      }
+    for (const key of ALL_RULE_KEYS) {
+      expect(ruleOf(moved, key)!.smoothingMs, key).toBe(ruleOf(base, key)!.smoothingMs)
     }
   })
 
   it('正交-跟手：只动跟手，所有 gain 不变', () => {
     const base = macroToMapping({ style: 'rhythmic', strength: 0.5, response: 0.5 })
     const moved = macroToMapping({ style: 'rhythmic', strength: 0.5, response: 0.9 })
-    for (const t of VISUAL_TARGETS) {
-      expect(moved.targets[t].primary.gain).toBe(base.targets[t].primary.gain)
-      if (base.targets[t].secondary) {
-        expect(moved.targets[t].secondary!.gain).toBe(base.targets[t].secondary!.gain)
+    for (const key of ALL_RULE_KEYS) {
+      expect(ruleOf(moved, key)!.gain, key).toBe(ruleOf(base, key)!.gain)
+    }
+  })
+
+  // —— id 认领：反应可增删之后，「全量重铺」会删掉用户写的东西，这几条是防线 ——
+
+  it('传入当前 mapping 时，用户手加的反应原样保留（拖旋钮不许删用户的反应）', () => {
+    const current = defaultRhythmPreset()
+    const mine = makeReaction({ element: 'body', property: 'thickness' })
+    mine.gain = 1.9
+    mine.smoothingMs = 777
+    current.reactions.push(mine)
+
+    const out = macroToMapping({ style: 'bass', strength: 1, response: 0 }, current)
+    const kept = out.reactions.find((r) => r.id === mine.id)
+    expect(kept, '用户反应必须还在').toBeDefined()
+    expect(kept).toEqual(mine) // 且一个字段都没被旋钮改
+  })
+
+  it('传入当前 mapping 时，用户删掉的官方反应不会被旋钮复活', () => {
+    const current = defaultRhythmPreset()
+    current.reactions = current.reactions.filter((r) => r.id !== 'body.brightness.secondary')
+    const out = macroToMapping({ style: 'ambient', strength: 0.8, response: 0.2 }, current)
+    expect(ruleOf(out, 'body.brightness.secondary')).toBeNull()
+  })
+
+  it('官方基线反应仍被完整重铺（认领不是「什么都不改」）', () => {
+    const current = defaultRhythmPreset()
+    current.reactions.push(makeReaction({ element: 'body', property: 'density' }))
+    const out = macroToMapping({ style: 'bass', strength: 0.5, response: 0.5 }, current)
+    // 低音档把 space 主源换成 low —— 用户反应在场不影响官方反应被换掉
+    expect(ruleOf(out, 'body.space.primary')!.source).toBe('low')
+  })
+
+  it('背景显影不受宏旋钮影响（三旋钮的语义都是主体律动）', () => {
+    const base = ruleOf(macroToMapping(DEFAULT_MACRO_KNOBS), 'backdrop.develop.primary')!
+    for (const style of MACRO_STYLES.map((s) => s.id)) {
+      for (const strength of [0, 1]) {
+        for (const response of [0, 1]) {
+          expect(ruleOf(macroToMapping({ style, strength, response }), 'backdrop.develop.primary'),
+            `${style}/${strength}/${response}`).toEqual(base)
+        }
       }
     }
+  })
+
+  it('不传当前 mapping 时返回完整基线——「专业表是否被手改」的判定要靠它', () => {
+    const out = macroToMapping(DEFAULT_MACRO_KNOBS)
+    expect(out.reactions.map((r) => r.id)).toEqual(defaultRhythmPreset().reactions.map((r) => r.id))
   })
 
   it('合法域：四档 × 两旋钮极值全组合，产出过 sanitizeMappingValues 原样且不越界', () => {
@@ -97,17 +130,15 @@ describe('macroToMapping（宏旋钮→专业表投影）', () => {
 
 // 7 条规则的全集（space/brightness 有 secondary，其余只有 primary）
 const ALL_RULE_KEYS: RuleKey[] = [
-  'space.primary', 'space.secondary',
-  'brightness.primary', 'brightness.secondary',
-  'density.primary', 'thickness.primary', 'speed.primary',
+  'body.space.primary', 'body.space.secondary',
+  'body.brightness.primary', 'body.brightness.secondary',
+  'body.density.primary', 'body.thickness.primary', 'body.speed.primary',
 ]
 
-/** 取某 key 对应的规则（不存在返回 null） */
-function ruleOf(m: ReturnType<typeof defaultRhythmPreset>, key: RuleKey): MappingRule | null {
-  const [t, slot] = key.split('.') as [keyof typeof m.targets, 'primary' | 'secondary']
-  const tm = m.targets[t]
-  if (!tm) return null
-  return slot === 'primary' ? tm.primary : (tm.secondary ?? null)
+/** 取某官方基线 id 对应的反应（不存在返回 null）。参数放宽为 string：
+ * 断言「背景反应不受宏旋钮影响」时要查 backdrop 的 id，那不在 RuleKey 域里。 */
+function ruleOf(m: MappingValues, key: string): Reaction | null {
+  return m.reactions.find((r) => r.id === key) ?? null
 }
 
 /** 两档之间「三元组不同」的规则条数 */
@@ -144,9 +175,9 @@ describe('风格表 styleBaseline / roleOf', () => {
   })
 
   it('speed 在三个非均衡档都换掉了 tempo（tempo 是常数，改它无画面反应）', () => {
-    expect(styleBaseline('balanced').targets.speed.primary.source).toBe('tempo')
+    expect(ruleOf(styleBaseline('balanced'), 'body.speed.primary')!.source).toBe('tempo')
     for (const id of ['rhythmic', 'ambient', 'bass'] as MacroStyle[]) {
-      expect(styleBaseline(id).targets.speed.primary.source, id).not.toBe('tempo')
+      expect(ruleOf(styleBaseline(id), 'body.speed.primary')!.source, id).not.toBe('tempo')
     }
   })
 
@@ -171,7 +202,7 @@ describe('风格表 styleBaseline / roleOf', () => {
       for (const key of ALL_RULE_KEYS) {
         expect(['lead', 'background', 'neutral']).toContain(roleOf(id, key))
       }
-      expect(roleOf(id, 'density.primary'), id).toBe('neutral')
+      expect(roleOf(id, 'body.density.primary'), id).toBe('neutral')
       // 每档都必须有主导和背景，否则劲儿退化成「全体放大」的老路
       expect(ALL_RULE_KEYS.some((k) => roleOf(id, k) === 'lead'), `${id} 需有主导`).toBe(true)
       expect(ALL_RULE_KEYS.some((k) => roleOf(id, k) === 'background'), `${id} 需有背景`).toBe(true)
@@ -181,7 +212,7 @@ describe('风格表 styleBaseline / roleOf', () => {
   it('脉冲源只能落在 space.primary / brightness.primary（§5.1 架构约束的结构性守卫）：'
     + '其余槽位走 EnvelopeFollower，单帧脉冲会被吃掉', () => {
     const PULSE_SOURCES = new Set(['beat', 'downbeat', 'drop'])
-    const PULSE_SAFE_KEYS = new Set<RuleKey>(['space.primary', 'brightness.primary'])
+    const PULSE_SAFE_KEYS = new Set<RuleKey>(['body.space.primary', 'body.brightness.primary'])
     for (const id of MACRO_STYLES.map((s) => s.id)) {
       const m = styleBaseline(id)
       for (const key of ALL_RULE_KEYS) {

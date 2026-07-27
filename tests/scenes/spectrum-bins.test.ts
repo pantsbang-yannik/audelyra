@@ -102,3 +102,57 @@ describe('映射速度→响应速率（调音台规范化：死线接活）', (
     expect(fast.values[10]).toBeLessThan(a.values[10]) // 快 3 倍回落更深
   })
 })
+
+describe('snapshotAdaptive / restoreAdaptive（信号源切换隔离）', () => {
+  /** 各 bin 不同值的谱：恒定平谱会让逐桶自峰归一把所有桶顶成 1.0，观测不出差异 */
+  const shaped = (scale: number): Float32Array => {
+    const a = new Float32Array(512)
+    for (let i = 0; i < 512; i++) a[i] = scale * (0.3 + 0.7 / (1 + i * 0.01))
+    return a
+  }
+
+  it('归一基准（逐桶峰值 + 全局峰）被还原——不还原则真实频谱会暂时偏矮', () => {
+    const b = new SpectrumBins()
+    for (let i = 0; i < 60; i++) b.update(shaped(10), false, 1 / 60)
+    const snap = b.snapshotAdaptive()
+
+    // 模拟人造源灌入远高的量级（试音的入场定标）
+    for (let i = 0; i < 60; i++) b.update(shaped(60), false, 1 / 60)
+    expect(b.snapshotAdaptive().peak, '污染后全局峰应显著抬高').toBeGreaterThan(snap.peak * 3)
+
+    b.restoreAdaptive(snap)
+    const back = b.snapshotAdaptive()
+    expect(back.peak).toBeCloseTo(snap.peak, 5)
+    expect(Array.from(back.binPeaks)).toEqual(Array.from(snap.binPeaks))
+    expect(Array.from(back.values)).toEqual(Array.from(snap.values))
+  })
+
+  it('还原后继续喂原量级，柱形与从未被污染时一致', () => {
+    const clean = new SpectrumBins()
+    const polluted = new SpectrumBins()
+    for (let i = 0; i < 60; i++) {
+      clean.update(shaped(10), false, 1 / 60)
+      polluted.update(shaped(10), false, 1 / 60)
+    }
+    const snap = polluted.snapshotAdaptive()
+    for (let i = 0; i < 60; i++) polluted.update(shaped(60), false, 1 / 60) // 被人造源污染
+    polluted.restoreAdaptive(snap)
+
+    for (let i = 0; i < 30; i++) {
+      clean.update(shaped(10), false, 1 / 60)
+      polluted.update(shaped(10), false, 1 / 60)
+    }
+    for (let k = 0; k < BIN_COUNT; k++) {
+      expect(polluted.values[k], `桶 ${k}`).toBeCloseTo(clean.values[k], 5)
+    }
+  })
+
+  it('快照是深拷贝：后续更新不改写已存快照', () => {
+    const b = new SpectrumBins()
+    for (let i = 0; i < 30; i++) b.update(shaped(10), false, 1 / 60)
+    const snap = b.snapshotAdaptive()
+    const copy = Array.from(snap.values)
+    for (let i = 0; i < 30; i++) b.update(shaped(50), false, 1 / 60)
+    expect(Array.from(snap.values)).toEqual(copy)
+  })
+})

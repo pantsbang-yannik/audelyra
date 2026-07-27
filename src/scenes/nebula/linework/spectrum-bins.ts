@@ -26,6 +26,15 @@ const EDGES: number[] = (() => {
   return e
 })()
 
+/** 跨信号源须隔离的柱形自适应状态（见 snapshotAdaptive） */
+export interface BinsAdaptiveState {
+  values: Float32Array
+  raw: Float32Array
+  binPeaks: Float32Array
+  peak: number
+  loud: number
+}
+
 export class SpectrumBins {
   readonly values = new Float32Array(BIN_COUNT)
   private readonly raw = new Float32Array(BIN_COUNT)
@@ -34,6 +43,28 @@ export class SpectrumBins {
    * 每桶按自身历史峰值归一，柱柱都有满高的机会（参考图类可视化的通行做法） */
   private readonly binPeaks = new Float32Array(BIN_COUNT).fill(PEAK_FLOOR)
   private loud = 0 // fb4 当前响度权重（本帧全场能量相对全局峰，已过 γ 曲线）
+
+  /** 快照 / 恢复全部自适应状态：**信号源切换（如进出试音）时必须成对调用**。
+   * 逐桶滚动峰值（binPeaks）与全局峰是 Scene 级长生命周期状态——不隔离则合成信号的定标
+   * 会让频谱环/日食的首次响应取决于此前放过什么音乐，退出后真实频谱也会暂时偏矮，
+   * 与「精确可重复」相违。values/raw 一并存取，避免恢复后柱形从残留高度突跳。 */
+  snapshotAdaptive(): BinsAdaptiveState {
+    return {
+      values: Float32Array.from(this.values),
+      raw: Float32Array.from(this.raw),
+      binPeaks: Float32Array.from(this.binPeaks),
+      peak: this.peak,
+      loud: this.loud,
+    }
+  }
+
+  restoreAdaptive(s: BinsAdaptiveState): void {
+    this.values.set(s.values)
+    this.raw.set(s.raw)
+    this.binPeaks.set(s.binPeaks)
+    this.peak = s.peak
+    this.loud = s.loud
+  }
 
   /** rateMul：映射速度→响应速率乘子（调音台规范化：死线接活）。1=现状；>1 起落同快（柱子更跟手） */
   update(spectrum: Float32Array | number[] | null, silence: boolean, dt: number, rateMul = 1): void {

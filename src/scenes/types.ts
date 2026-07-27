@@ -90,5 +90,15 @@ export interface Scene {
   applyBackground?(b: BackgroundSettings): void
   /** 星系图鉴（idea #4）：进入/退出/视图更新一体（active 翻转=模式切换）；未实现的场景忽略 */
   applyGalaxy?(g: GalaxyView): void
+  /** 试音模式进出：场景据此**隔离自适应状态**（滚动峰值归一等）。
+   * 不隔离会双向出错——试音的定标压低退出后安静歌曲的反应（半衰期 30s，残留上百秒），
+   * 而历史响歌又会让同一个 pad 的响应打折、破坏「精确可重复」。
+   * @param resetPeaks 进入时把频段归一峰值**复位**到此量级（试音的标定值），使 pad 响应与听歌史无关；
+   *                   退出时还原为进入前的快照。未实现的场景忽略 */
+  setAuditionActive?(active: boolean, resetPeaks?: [number, number, number]): void
+  /** 星系是否已完全退出（相位回到 live）。模式切换须据此**等待视觉状态真正结束**——
+   * 星系是独立更新路径（跳过 mapper），退出时还有约 1s 的溶解动画；只翻布尔就开演，
+   * 会得到「试音条与音效都正常、画面映射却无效」的假象。未实现的场景视为恒为 true */
+  isGalaxyIdle?(): boolean
   dispose(): void
 }

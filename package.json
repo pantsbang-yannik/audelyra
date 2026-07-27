@@ -1,6 +1,6 @@
 {
   "name": "audelyra",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "description": "Audelyra — 让声音显形",
   "main": "./out/main/main.js",
   "scripts": {
@@ -15,7 +15,7 @@
     "gen:demo-trace": "node scripts/gen-demo-trace.mjs",
     "gen:demo-audio": "vite-node scripts/gen-demo-trace-from-audio.ts",
     "predist": "test -x native/mac-tap/audelyra-tap || bash native/mac-tap/build.sh",
-    "dist": "npm run build && bash scripts/make-icns.sh && electron-builder --config electron-builder.yml"
+    "dist": "npm run build && bash scripts/make-icns.sh && APPLE_KEYCHAIN_PROFILE=audelyra-notary APPLE_TEAM_ID=AHRB2HD27M electron-builder --config electron-builder.yml"
   },
   "author": "Yannik",
   "license": "GPL-3.0-only",

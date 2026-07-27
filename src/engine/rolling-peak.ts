@@ -12,4 +12,9 @@ export class RollingPeak {
   get peak(): number {
     return this._peak
   }
+  /** 直接置峰值——信号源切换时保存/恢复自适应状态用。
+   * 不能用 seed 代替：seed 只会抬高（`max`），无法还原到更低的值。 */
+  setPeak(v: number): void {
+    this._peak = Math.max(0, v)
+  }
 }

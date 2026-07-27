@@ -18,7 +18,7 @@ import { CameraDirector } from './camera-director'
 import { Tween, quantizeToBeatGrid, easeStandard, easeImpact, easeDrift } from '../shared/motion'
 import { pickInitialTier, FpsGovernor } from '../shared/quality'
 import { AwakeningDirector } from './awakening'
-import { AudioVisualMapper } from './mapping/mapper'
+import { AudioVisualMapper, type MapperAdaptiveState } from './mapping/mapper'
 import { defaultRhythmPreset } from './mapping/spec'
 import type { MappingValues } from './mapping/types'
 import { resolveShape, planRefreshAction, shapeSelectionChanged, isBackfillReveal, type ResolvedKind, type ResolvedShape } from './shapes/resolve'
@@ -49,7 +49,7 @@ import type { BackgroundCaps } from '../types'
 import { galaxyStep, type GalaxyPhase, type GalaxyAction } from './galaxy/phase'
 import { GalaxyDirector } from './galaxy/director'
 import type { GalaxyView } from './galaxy/types'
-import { SpectrumBins } from './linework/spectrum-bins'
+import { SpectrumBins, type BinsAdaptiveState } from './linework/spectrum-bins'
 import { LineworkBody } from './linework/linework-body'
 import { BodyCrossfade, slotOfBody, type BodySlot } from './linework/body-fade'
 import { LedWaves } from './linework/led-waves'
@@ -126,6 +126,12 @@ export function createNebulaScene(): Scene {
   // mapper 内部状态（新粒子无历史），mapping 本身沿用，满足重放铁律（spec §7）。
   let mapper = new AudioVisualMapper()
   let mapping: MappingValues = defaultRhythmPreset()
+  /** 进入试音前的自适应状态快照（见 setAuditionActive）；null = 当前不在试音中 */
+  let preAuditionPeaks: {
+    mapper: MapperAdaptiveState
+    rig: [number, number, number] | null
+    bins: BinsAdaptiveState
+  } | null = null
 
   // Phase C2 运动方言：program 持有粒子 uniform 引用，与 rig 同生命周期（构造/重建完全同步）；
   // motionSettings 是闭包变量，applyMotion 热更后立即在下一帧生效（重放语义同 mapping）
@@ -587,6 +593,8 @@ export function createNebulaScene(): Scene {
           gain: bgCaps.ripple ? backgroundSettings.ripple : 0,
         })
         mirror?.update(dt, { primary: u.uColorA.value, energy: u.uEnergy.value, sleep: u.uSleep.value, ripples: galaxyRipples })
+        // 不传第四参 ⇒ 背景反应取静止值（不调制）：与本模式冻结 drop/low/mid/high 的既有处置同源，
+        // 图鉴模式不追音频细节
         backdrop?.update(dt, camera, {
           energy: u.uEnergy.value, sleep: u.uSleep.value,
           opacity: backgroundSettings.bgOpacity, saturation: backgroundSettings.bgSaturation, breathe: backgroundSettings.bgBreathe,
@@ -627,9 +635,9 @@ export function createNebulaScene(): Scene {
       // 不碰 SignalRig 名下的 14 个 uniform（其每帧无条件覆写，见文件头分工纪律）
       const tMapping = probing ? performance.now() : 0
       const controls = mapper.update(signals, mapping, dt)
-      u.uPulseSpace.value = controls.space
-      u.uPulseBright.value = controls.brightness * climaxScale(motionSettings.climaxBrightness) // #高潮亮度：全场脉冲提亮压档
-      u.uThicken.value = 1 + controls.thickness * MAP_THICKEN_SPAN // 死线接活：厚度→粒径饱满（默认规则=低频重量）
+      u.uPulseSpace.value = controls.body.space
+      u.uPulseBright.value = controls.body.brightness * climaxScale(motionSettings.climaxBrightness) // #高潮亮度：全场脉冲提亮压档
+      u.uThicken.value = 1 + controls.body.thickness * MAP_THICKEN_SPAN // 死线接活：厚度→粒径饱满（默认规则=低频重量）
 
       // 1.6) C2 运动方言：MotionProgram 消费叙事+三 band 包络，写方言 9 uniform + 产后期乐器值
       const motionInputs = {
@@ -637,7 +645,7 @@ export function createNebulaScene(): Scene {
         low: u.uLow.value, mid: u.uMid.value, high: u.uHigh.value,
         kickEnv: u.uKickEnv.value, dropPulse: u.uDrop.value, kickStrength: u.uKick.value,
         energy: u.uEnergy.value,
-        mapSpeed: controls.speed, mapDensity: controls.density, // 死线接活：mapper 同帧输出（1.5 段已算）
+        mapSpeed: controls.body.speed, mapDensity: controls.body.density, // 死线接活：mapper 同帧输出（1.5 段已算）
       }
       const instrument = motionProgram!.update(dt, motionInputs, motionSettings)
 
@@ -732,7 +740,7 @@ export function createNebulaScene(): Scene {
       // 星系模式不受影响——入场段已强制 particles.mesh.visible=true，且星系期本段不执行
       const bodyConcealed = isBodyConcealed(shapeSettings.showBody, backgroundSettings.current, !!sky)
       particles.mesh.visible = !bodyConcealed && particleFade > 0.01
-      const lineRate = 1 + LINE_RATE_SPAN * controls.speed
+      const lineRate = 1 + LINE_RATE_SPAN * controls.body.speed
       // 线条系共用帧输入：节拍事件喂纯逻辑模块，其余喂画板 uniform
       const bodyEv = {
         onBeat: signals?.beat.onBeat ?? false, strength: signals?.beat.strength ?? 0,
@@ -745,7 +753,7 @@ export function createNebulaScene(): Scene {
         colorA: u.uColorA.value, colorC: u.uColorC.value,
         brightness: motionSettings.lineBrightness,
         pulseSpace: u.uPulseSpace.value, pulseBright: u.uPulseBright.value,
-        mapDensity: controls.density, mapThick: controls.thickness,
+        mapDensity: controls.body.density, mapThick: controls.body.thickness,
       }
       // 频谱桶：linework/eclipse 两个消费方任一在场才推进
       if (bodyXfade.fadeOf('linework') > 0.01 || bodyXfade.fadeOf('eclipse') > 0.01) {
@@ -844,7 +852,7 @@ export function createNebulaScene(): Scene {
       backdrop?.update(dt, camera, {
         energy: u.uEnergy.value, sleep: u.uSleep.value,
         opacity: backgroundSettings.bgOpacity, saturation: backgroundSettings.bgSaturation, breathe: backgroundSettings.bgBreathe,
-      })
+      }, controls.backdrop) // B1 显影：背景元素的三个属性由反应驱动
 
       // 5.5) 切歌拼字：状态机出帧 → spawn 时采样上传+出生朝向镜头；亮度随沉睡幕布压暗。
       // 模式/位置/大小走每帧 setter 注入（同 director.setLiveliness 先例）：applyTitle 热更下一帧生效。
@@ -1131,6 +1139,37 @@ export function createNebulaScene(): Scene {
       const r = galaxyStep(galaxyPhase, { kind: 'apply', active: g.active }, g.active)
       galaxyPhase = r.phase
       for (const a of r.actions) runGalaxyAction(a, null)
+    },
+
+    /** 人造信号源（试音）进出：把**全部**跨源自适应状态存起来、回来时还原，使两侧互不污染
+     * （理由见 Scene.setAuditionActive）。三处各自持有一套，缺一处就会漏：
+     *   · mapper —— 频段归一峰值 + `beatCount`（`downbeat` 由它 `% 4` 派生，不隔离会永久移相真实重拍）
+     *   · rig    —— 三频段的滚动峰值
+     *   · spectrumBins —— 64 桶逐桶峰值 + 全局峰（不隔离则频谱环/日食首次响应取决于此前的音乐）
+     * 快照可能因中途换形状/换粒子而失效（那两条路会 new AudioVisualMapper / new SignalRig），
+     * 届时还原落在新实例上等同于给它播种一个真实音乐的量级，仍优于留着试音的定标。 */
+    isGalaxyIdle(): boolean {
+      return galaxyPhase === 'off'
+    },
+
+    setAuditionActive(active: boolean, resetPeaks?: [number, number, number]): void {
+      if (active) {
+        preAuditionPeaks = {
+          mapper: mapper.snapshotAdaptive(),
+          rig: rig?.snapshotBandPeaks() ?? null,
+          bins: spectrumBins.snapshotAdaptive(),
+        }
+        // 复位到试音自己的标定量级：只存档不复位则历史峰值仍在，听过更响的歌会让同一个 pad 打折
+        if (resetPeaks) {
+          mapper.restoreBandPeaks(resetPeaks)
+          rig?.restoreBandPeaks(resetPeaks)
+        }
+      } else if (preAuditionPeaks) {
+        mapper.restoreAdaptive(preAuditionPeaks.mapper)
+        if (preAuditionPeaks.rig) rig?.restoreBandPeaks(preAuditionPeaks.rig)
+        spectrumBins.restoreAdaptive(preAuditionPeaks.bins)
+        preAuditionPeaks = null
+      }
     },
 
     dispose() {

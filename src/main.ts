@@ -21,6 +21,7 @@ import demoAudioUrl from './assets/audio/onboarding-demo.mp3?url'
 import { IdleHint } from './ui/idle-hint'
 import { IdleHintLogic } from './ui/idle-hint-logic'
 import { frameRms, AUDIBLE_RMS } from './audio/pcm-energy'
+import { SignalSourceArbiter, shouldIngestLocalPcm, shouldIngestSystemPcm } from './audio/signal-source'
 import { EnergyRibbon, composePoster, posterFilename, type PosterMeta } from './ui/poster'
 import { MediaPreview, type MediaChoice } from './ui/poster-preview'
 import { ReplayRecorder } from './replay/replay-recorder'
@@ -29,6 +30,9 @@ import { ShapeCreatePanel } from './ui/shape-create'
 import { DropOverlay } from './ui/drop-overlay'
 import { DropChoice } from './ui/drop-choice'
 import { UpdateNotice, type UpdateStatusMsg } from './ui/update-toast'
+import { AuditionPad, AUDITION_BAND_PEAKS } from './audition/audition-pad'
+import { PadSound } from './audition/pad-sound'
+import { AuditionBar } from './ui/audition-bar'
 import { LocalPlayer } from './audio/local-player'
 import { PlayerBar } from './ui/player-bar'
 import { LocalQueue, type QueueTrack } from './audio/local-queue'
@@ -188,16 +192,47 @@ async function boot(): Promise<void> {
 
   const engine = new AudelyraEngine()
   let liveMuted = false
+  // ↓ 这五个布尔是**派生值**，只读不写——唯一真源是下面的 sources.pcmSource / sources.injector（见 audio/signal-source.ts）。
+  // 读取点很多（idle-hint 抑制、星系空闲判定、压制汇流等），故保留布尔形态让它们零改动。
   let replayActive = false
   let localActive = false
-  let demoActive = false // 序幕 demo trace 在演（发布准备③）：同回放语义,旁路系统捕获防双信号灌引擎
-  // 静音是"或"语义:trace 回放、本地播放、序幕演示任一活跃都旁路系统捕获(防双重进引擎/信号打架)
-  const updateLiveMute = (): void => { liveMuted = replayActive || localActive || demoActive }
+  let demoActive = false
+  let auditionActive = false
+
+  /** 各源的停演钩子——晚于 arbiter 才赋值，故收进对象持有
+   * （裸 let 会被 TS 的控制流分析窄化成 null）。stopReplay 仅 DEV 有。
+   * ⚠️ 二者都**只负责收摊，不许再切直灌权**——在停演钩子里切就是无限递归，arbiter 会当场抛错。 */
+  const sourceHooks: { stopReplay: (() => void) | null; teardownAudition: (() => void) | null } =
+    { stopReplay: null, teardownAudition: null }
+  /** 场景侧自适应状态的隔离钩子（试音这类人造源专用）——在 host 就绪后回填 */
+  const sceneHooks: { setSynthetic: ((on: boolean) => void) | null } = { setSynthetic: null }
+
+  /** PCM 来源与直灌源——「任一时刻只有一路信号灌引擎」的唯一真源（`audio/signal-source.ts`）。
+   * 状态、切换次序与重入防线都在那个纯逻辑类里，本处只负责接线：
+   * 派生布尔回填、清残留帧、停旧源、人造源进出时通知场景隔离。 */
+  const sources = new SignalSourceArbiter({
+    onFlags: (f) => {
+      liveMuted = f.liveMuted
+      replayActive = f.replayActive
+      localActive = f.localActive
+      demoActive = f.demoActive
+      auditionActive = f.auditionActive
+    },
+    clearFrame: () => engine.bus.clearFrame(),
+    stopInjector: (which) => {
+      switch (which) {
+        case 'replay': sourceHooks.stopReplay?.(); break
+        case 'audition': sourceHooks.teardownAudition?.(); break
+        case 'demo': case 'bench': case 'none': break // 这几路的停演由其拥有者在自己的生命周期里管
+      }
+    },
+    onSyntheticChange: (on) => sceneHooks.setSynthetic?.(on),
+  })
   // 原始帧能量探针（发布准备③）：「听到声音」判定与 bus 解耦——liveMuted 期间（demo/回放/本地）
   // 真实系统声照样被探到，引导成功判定与空状态提示都吃这一路
   let lastAudibleAt = -Infinity
   window.audelyra.onPcmFrame((f) => {
-    if (!liveMuted) engine.ingest(f)
+    if (shouldIngestSystemPcm(sources.pcmSource, sources.injector)) engine.ingest(f)
     if (frameRms(f.samples) >= AUDIBLE_RMS) lastAudibleAt = performance.now()
   })
   // 捕获状态接入空状态提示（发布准备③ 权限闭环）：unavailable 从此有 UI 出路，不再只 console
@@ -213,11 +248,14 @@ async function boot(): Promise<void> {
   if (import.meta.env.DEV) {
     // 生产剥离：R 键 trace 录制/回放仅开发版可用，DEV=false 时整个分支连 chunk 一起被消除
     const { installTraceControls } = await import('./ui/debug/trace-controls')
-    installTraceControls({
+    const trace = installTraceControls({
       bus: engine.bus,
-      onReplayStart: () => { replayActive = true; updateLiveMute() },
-      onReplayEnd: () => { replayActive = false; updateLiveMute() }
+      onReplayStart: () => {
+        sources.setInjector('replay') // 抢占直灌权：会顺带停掉试音、清残留帧
+      },
+      onReplayEnd: () => { if (sources.injector === 'replay') sources.setInjector('none') }
     })
+    sourceHooks.stopReplay = trace.stopReplay
   }
 
   // #perf 走正常场景装配路径（不是 #debug 的 2D 分支）——HUD 与基准必须能看到真正的 Nebula
@@ -403,8 +441,9 @@ async function boot(): Promise<void> {
       }
     })
     const localPlayer = new LocalPlayer({
-      // trace 回放活跃时本地 PCM 也让位,防双信号灌引擎(同 updateLiveMute 的 replayActive||localActive 口径)
-      onPcm: (f) => { if (localActive && !replayActive && !demoActive) engine.ingest(f) }, // demo 同回放让位（纵深，引导期拖放已挂起）
+      // 让路判定走仲裁纯函数（audio/signal-source.ts）：任何直灌源活跃时本地 PCM 一律让位，
+      // 新增源不必再来这里补条件——那正是此前连续三轮漏源的原因
+      onPcm: (f) => { if (shouldIngestLocalPcm(sources.pcmSource, sources.injector)) engine.ingest(f) },
       onTime: (cur, dur) => {
         playerBar.setTime(cur, dur)
         // 本地进度喂场景做歌词时钟(系统 progress 在 localActive 期间被拦,见上方缓存逻辑)
@@ -477,8 +516,7 @@ async function boot(): Promise<void> {
         return
       }
       failStreak = 0
-      localActive = true
-      updateLiveMute()
+      sources.setPcmSource('local') // localActive 随派生自动转 true
       window.audelyra.localProgress(true) // load 成功即在播:首帧 play 事件早于 localActive 置位,聆听钟起表不能靠残留的 playing 兜底
       playerBar.show(t.displayName)
       playerBar.setLoop(queue.loop)
@@ -516,8 +554,7 @@ async function boot(): Promise<void> {
       queue.clear()
       failStreak = 0
       refreshQueueUi()
-      localActive = false
-      updateLiveMute()
+      sources.setPcmSource('live') // 交还 PCM 来源给系统捕获
       playerBar.hide()
       // 重放缓存恢复系统现场:track/进度/歌词全部补喂(期间系统可能已切歌,缓存是最新的)
       if (lastSysTrack) {
@@ -646,7 +683,7 @@ async function boot(): Promise<void> {
     // 背景创建（自定义背景 v1）：口径对齐 createShapeFromImage——早退快检省解码开销，
     // 落盘成功后重取快照再拼 setSettings（防窗口期并发覆盖，终审 Finding 2 同款纪律）
     const currentBackground = async (): Promise<BackgroundSettings> => (await window.audelyra.getSettings()).background
-    // 卡片显示名（亲验反馈）：原文件名去扩展名；sanitize 侧截 80 字符兜底
+    // 卡片显示名：原文件名去扩展名；sanitize 侧截 80 字符兜底
     const bgDisplayName = (fileName: string): string => fileName.replace(/\.[^.]+$/, '')
 
     const createBackgroundFromImage = async (file: File): Promise<void> => {
@@ -736,7 +773,7 @@ async function boot(): Promise<void> {
     const galaxyTooltip = new GalaxyTooltip(overlayDiv)
     let galaxyOn = false
     let galaxyAuto = false // 空闲自动进入的（音乐一来自动退）；手动进入不受影响
-    let shapePickerOpen = false // suppression 汇流用（评审 P1-5）：ShapePicker deps 稍后赋值
+    let shapePickerOpen = false // suppression 汇流用：ShapePicker deps 稍后赋值
     let galaxyRecords: GalaxyPlayRecord[] = []
     let galaxyStars: GalaxyStar[] = []
     let galaxyFilter: GalaxyFilter = { kind: 'all' }
@@ -745,11 +782,14 @@ async function boot(): Promise<void> {
     const tintCache = new Map<string, [number, number, number] | null>() // artworkKey → 主色（跨进出复用）
     const todayStr = (): string => localDateOf(new Date().toISOString())
 
-    // 角标压制（评审 P1-5）：galaxy 与 ShapePicker 共用布尔 setSuppressed，
+    // 角标压制：galaxy 与 ShapePicker 共用布尔 setSuppressed，
     // 各自直写会互踩（galaxy 期开关 picker 把压制解掉）——统一求或后写入
     const updateSuppressed = (): void => {
       const s = galaxyOn || shapePickerOpen
       badge.setSuppressed(s)
+      // PlayerBar 同款汇流（原为 ShapePicker 直写，加入试音模式后成了两个来源）：
+      // 退试音时若选择器还开着，直写 false 会把播放条弹回卡片之上。galaxyOn 不入此式——沿用原语义
+      playerBar.setSuppressed(shapePickerOpen || auditionActive)
     }
 
     const pushGalaxy = (): void => {
@@ -815,6 +855,8 @@ async function boot(): Promise<void> {
 
     const enterGalaxy = async (auto: boolean): Promise<void> => {
       if (galaxyOn) return
+      // 与试音互斥（理由同 enterAudition）：星系不跑 mapper，叠加后试音台看着在演其实无效
+      if (auditionActive) exitAudition()
       galaxyOn = true
       galaxyAuto = auto
       galaxyFilter = { kind: 'all' }
@@ -885,7 +927,9 @@ async function boot(): Promise<void> {
     let idleHintPermission = false // 权限指引在场时星系不空闲劫持（发布准备③）：真身在 idle-hint 接线段随采样更新
     galaxyIdleTick = () => {
       // !localActive：spec §3.2 拍板「本地播放不算空闲」——本地暂停接电话回来不该发现自己进了星系（评审 P1-6）
-      if (!galaxyOn && modalCount === 0 && !localActive && !shapePickerOpen && !idleHintPermission && performance.now() - lastAudioTs > IDLE_ENTER_MS) { // 选择器开着=用户正在交互,不劫持进星系(探针实锤picker不计modalCount)
+      // !auditionActive 显式写死：试音正在演时不许劫持进星系（用户在盯画面验反应，被拽进图鉴是灾难）。
+      // 静息底 silence=false 会持续推 lastAudioTs、事实上也挡得住，但那是巧合不是设计，不留在「碰巧没事」的状态
+      if (!galaxyOn && modalCount === 0 && !localActive && !shapePickerOpen && !auditionActive && !idleHintPermission && performance.now() - lastAudioTs > IDLE_ENTER_MS) { // 选择器开着=用户正在交互,不劫持进星系(探针实锤picker不计modalCount)
         void enterGalaxy(true)
       }
     }
@@ -918,9 +962,8 @@ async function boot(): Promise<void> {
       setShape: (s) => window.audelyra.setSettings({ shape: s }),
       onShapeChanged: (cb) => window.audelyra.onSettingsChanged((s) => cb(s.shape)),
       onOpenStateChanged: (open) => {
-        shapePickerOpen = open; updateSuppressed() // 选择器是前台主角：角标/全屏提示让位（B2 亲验反馈，重叠实锤）——
-        // 与 galaxy 共用布尔汇流后经 updateSuppressed 统一写入（评审 P1-5，防两者直写互踩）
-        playerBar.setSuppressed(open) // 同惯例：底部全宽卡片打开时会压在 PlayerBar 上，一并让位
+        shapePickerOpen = open; updateSuppressed() // 选择器是前台主角：角标/全屏提示/播放条让位（会与之重叠）——
+        // 与 galaxy/试音共用布尔汇流后经 updateSuppressed 统一写入（防多者直写互踩）
         if (!open) lastAudioTs = performance.now() // 关闭=刚交互完,重开一轮空闲窗——否则空闲已超时会秒进星系（同 exitGalaxy 语义）
       },
       readCustomShapeImage: (id) => window.audelyra.readCustomShape(id),
@@ -1040,12 +1083,78 @@ async function boot(): Promise<void> {
       }
     })
 
+    // 试音模式：pad 合成 Signals 直发 bus，期间真实音频让路（同 trace 回放语义）。
+    // 独立模式而非调音台的子状态——调音台开着就是边调边试，关着就是纯感受画面反应。
+    // 音效走独立 AudioContext 直连 destination、不经任何 tap，故只到扬声器不进引擎。
+    const auditionPad = new AuditionPad()
+    const padSound = new PadSound()
+    let auditionRaf = 0
+    const auditionBar = new AuditionBar(overlayDiv, {
+      onTrigger: (id) => { auditionPad.trigger(id); padSound.play(id) },
+      onExit: () => exitAudition()
+    })
+    /** 等星系退场的 rAF 句柄——防连点起多个等待循环 */
+    let auditionPendingRaf = 0
+    const enterAudition = (): void => {
+      if (auditionActive) return // 幂等：重复进入会漏掉前一个 rAF 句柄，循环永远停不下来
+      if (demoActive) return // 序幕在演：引导期坞已屏蔽，此为防御性早退
+      // 星系是独立更新路径（nebula/index.ts 明写「不跑 rig/sm/mapper」且在 mapper 之前 return），
+      // 与试音叠加会得到「pad 条与音效都正常、但 mapping 根本没跑」的假象。
+      // 只翻布尔不够——退星系还有约 1s 的溶解动画，期间 mapper 仍被跳过，故须等相位真正回到 live。
+      if (galaxyOn || !host.isGalaxyIdle()) {
+        if (galaxyOn) exitGalaxy()
+        cancelAnimationFrame(auditionPendingRaf) // 连点只保留最后一个等待循环
+        const waitGalaxyIdle = (): void => {
+          if (galaxyOn) return // 等待期间用户又进了星系：放弃本次开演
+          if (host.isGalaxyIdle()) { enterAudition(); return } // 此时 galaxyOn=false，不会再走进本分支
+          auditionPendingRaf = requestAnimationFrame(waitGalaxyIdle)
+        }
+        auditionPendingRaf = requestAnimationFrame(waitGalaxyIdle)
+        return
+      }
+      sources.setInjector('audition') // 抢占直灌权：顺带停掉 trace 回放、清残留帧、通知场景隔离
+      auditionPad.reset() // 每次进入从静息底开始，不继承上次残留的包络
+      updateSuppressed() // 底部让位：试音期间本地播放信号已让路，播放条留着也是摆设（走汇流，防与选择器互踩）
+      auditionBar.show()
+      let last = performance.now()
+      // 必须每帧 publish：只在触发帧发一次的话 bus._latest 会永久停在冲量峰值（连续字段不清零），
+      // 画面冻结在最亮那一刻
+      const step = (now: number): void => {
+        engine.bus.publish(auditionPad.step(Math.min((now - last) / 1000, 0.1)))
+        last = now
+        auditionRaf = requestAnimationFrame(step)
+      }
+      auditionRaf = requestAnimationFrame(step)
+    }
+    /** 本地收摊：停 rAF、收条、重算压制。**不碰直灌权**——谁切换谁负责。
+     * 由 arbiter 在「试音不再是当前直灌源」之后回调，两种场景共用：
+     * 用户主动退出（exitAudition 切走）、别的源抢占（trace/本地播放切走）。
+     * 拆出来是为了不重入 setInjector——在停演钩子里再切一次直灌权正是那条爆栈的递归，
+     * 现已由 SignalSourceArbiter 的重入哨兵当场抛错，不会再静默栽第二次。 */
+    const teardownAudition = (): void => {
+      cancelAnimationFrame(auditionPendingRaf)
+      cancelAnimationFrame(auditionRaf)
+      auditionBar.hide()
+      updateSuppressed() // 选择器可能还开着，压制态由汇流重算而非直写 false
+    }
+    /** 用户主动退出：交还直灌权，收摊由 setInjector 回调 teardownAudition 完成 */
+    const exitAudition = (): void => {
+      cancelAnimationFrame(auditionPendingRaf) // 若还在等星系退场，撤销本次开演
+      if (!auditionActive) return
+      sources.setInjector('none') // 清残留帧 + 通知场景还原自适应状态 + 回调 teardownAudition
+    }
+    sourceHooks.teardownAudition = teardownAudition // 回填：直灌权已切走，此处只负责收摊
+    // 人造源进出时隔离场景侧自适应状态（频段峰值 / beatCount / 柱形峰值）——由 setInjector 统一触发，
+    // 不再依赖各调用点自己记得调，这正是此前连续漏源的根因
+    sceneHooks.setSynthetic = (on) => host.setAuditionActive(on, on ? AUDITION_BAND_PEAKS : undefined)
+
     const dock = new ControlDock(overlayDiv, {
       toggleTuning: () => tuningPanel.toggle(),
       toggleShapes: () => shapePicker.toggle(),
       snapPoster: () => void shutter(),
       snapClip: () => void clipShutter(),
-      openLocalFile: () => audioInput.click()
+      openLocalFile: () => audioInput.click(),
+      toggleAudition: () => { if (auditionActive) exitAudition(); else enterAudition() }
     })
     // 操作坞容器登记为「点外部关」的忽略区——点图标本身不该被面板的 pointerdown 当成点外部
     // 先行 close，避免图标自身的 click→toggle() 因面板已被抢先关闭而重开（Task A-toggle-fix）
@@ -1115,7 +1224,7 @@ async function boot(): Promise<void> {
           const text = await (await fetch(new URL('./assets/traces/onboarding-demo.jsonl', import.meta.url))).text()
           traceSha = await sha256Hex(text)
           tracePlayer = new TracePlayer(text)
-          replayActive = true; updateLiveMute()
+          sources.setInjector('replay')
           let last = performance.now()
           const step = (now: number): void => {
             tracePlayer?.step(Math.min((now - last) / 1000, 0.1), (s) => engine.bus.publish(s))
@@ -1127,7 +1236,7 @@ async function boot(): Promise<void> {
       }
       const stopTrace = (): void => {
         cancelAnimationFrame(traceRaf); tracePlayer = null
-        replayActive = false; updateLiveMute()
+        sources.setInjector('none')
       }
       const startPcm = async (): Promise<void> => {
         // 预解码不计入测量：解码在 warmup 之前完成
@@ -1138,7 +1247,7 @@ async function boot(): Promise<void> {
         const sr = decoded.sampleRate
         const BATCH = 1024 // 与 PcmBatcher.BATCH_SAMPLES 一致
         let cursor = 0
-        replayActive = true; updateLiveMute() // 旁路系统捕获，防双信号灌引擎
+        sources.setInjector('bench') // 自行 ingest 合成 PCM，故系统捕获须让路（经统一仲裁，不再直写布尔）
         // 按挂钟节奏补送，与真实链路的突发特性接近
         const blockMs = (BATCH / sr) * 1000
         pcmTimer = window.setInterval(() => {
@@ -1153,7 +1262,7 @@ async function boot(): Promise<void> {
       }
       const stopPcm = (): void => {
         window.clearInterval(pcmTimer)
-        replayActive = false; updateLiveMute()
+        if (sources.injector === 'bench') sources.setInjector('none')
       }
 
       // 声明顺序：panel 的按钮回调要引用 runBench，runBench 又要报进度给 panel——
@@ -1338,8 +1447,7 @@ async function boot(): Promise<void> {
           }, 30)
         }
         if (demoActive) {
-          demoActive = false
-          updateLiveMute() // 停演即解除静音，真实信号无缝接管
+          sources.setInjector('none') // 停演即交还直灌权（demoActive 随派生自动转 false），真实信号无缝接管
           void window.audelyra.getSettings().then((s) => host.applyShape(s.shape)) // 恢复用户真形状（瞬态站形体不落盘）
           // 序幕资产收尾卸载（审①P2-3/审②P2-9）：raw 点数据 + 生成态点云共 ~30MB 只属首启会话
           unloadContourAssets(DEMO_CONTOUR_IDS)
@@ -1350,8 +1458,7 @@ async function boot(): Promise<void> {
       const playback = runDemoPlayback(demoTraceRaw, (s) => engine.bus.publish(s))
       if (playback) {
         demoPlayback = playback
-        demoActive = true
-        updateLiveMute()
+        sources.setInjector('demo') // 经统一仲裁：抢占直灌权 + 清残留帧（此前直写布尔，漏在仲裁之外）
         // 序幕配乐（亲验反馈轮②）：与 trace 出自同一音源同一段落 → 脉动与听感同拍；
         // 播放失败（自动播放策略等）静默降级为无声序幕，不阻塞流程
         demoAudio = new Audio(demoAudioUrl)
@@ -1421,7 +1528,8 @@ async function boot(): Promise<void> {
         audible: performance.now() - lastAudibleAt < 1000,
         hasTrack: lastSysTrack?.kind === 'change' && lastSysProgress?.playing === true,
         captureUnavailable,
-        suppressed: modalCount > 0 || shapePickerOpen || localActive || replayActive || onboardingOpen || !onboardedFlag,
+        // 试音在演也算压制：画面明明在动却弹「没听到声音」是自相矛盾（试音无真实 PCM，audible 恒 false）
+        suppressed: modalCount > 0 || shapePickerOpen || localActive || replayActive || auditionActive || onboardingOpen || !onboardedFlag,
         dt: IDLE_HINT_TICK_MS / 1000
       })
       idleHintPermission = state === 'permission'
